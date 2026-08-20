@@ -1,0 +1,58 @@
+# Dev environment (podman). Spec: docs/specs/2026-08-19-lilium-chat-elixir-redesign.md
+#
+#   podman compose up -d postgres   # DB only
+#   podman compose up               # DB + app (mix phx.server on :4000)
+#   podman compose run --rm app mix test
+#   podman compose down
+#
+# Named volumes lilium_hex / lilium_mix cache hex packages and mix
+# archives so repeated container runs don't re-fetch.
+#
+# The host has no Elixir toolchain — everything Elixir runs in the
+# elixir:1.20-otp-29 image (spec §2.1: Elixir 1.20 / OTP 29).
+services:
+  postgres:
+    image: docker.io/library/postgres:18
+    container_name: lilium_chat_pg
+    environment:
+      POSTGRES_USER: chat
+      POSTGRES_PASSWORD: chat
+      POSTGRES_DB: lilium_chat_dev
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    # PG 18+ stores data under /var/lib/postgresql/<version> (pg_ctlcluster
+    # layout) — mount the parent dir, not the old /data path.
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chat -d lilium_chat_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  app:
+    image: docker.io/library/elixir:1.20-otp-29
+    container_name: lilium_chat_app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Note: MIX_ENV is intentionally NOT set — mix defaults to :dev for
+    # `mix phx.server`, and `mix test` sets :test itself. Pinning MIX_ENV
+    # here would leak into `mix test` and break the SQL Sandbox pool.
+    environment:
+      DB_HOSTNAME: postgres
+      DB_PORT: "5432"
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./:/app
+      - lilium_hex:/root/.hex
+      - lilium_mix:/root/.mix
+    working_dir: /app
+    command: sh -c "mix deps.get && mix ecto.create --quiet && mix ecto.migrate --quiet && exec mix phx.server"
+
+volumes:
+  pgdata:
+  lilium_hex:
+  lilium_mix:

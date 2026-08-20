@@ -35,7 +35,7 @@ defmodule LiliumChat.MixProject do
       {:phoenix, "~> 1.8.11"},
       {:phoenix_ecto, "~> 4.5"},
       {:ecto_sql, "~> 3.10"},
-      {:postgrex, ">= 0.0.0"},
+      {:postgrex, "~> 0.22"}, # lock to 0.22.x (1.0.0-rc.1 is pre-release)
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
       {:jason, "~> 1.2"},

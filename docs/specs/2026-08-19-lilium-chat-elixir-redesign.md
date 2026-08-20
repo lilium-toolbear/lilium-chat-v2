@@ -60,7 +60,7 @@
 
 | 层 | 选择 | 说明 |
 |---|------|------|
-| HTTP/WS | **Phoenix 1.7 + Bandit** | Phoenix Channels 承载 3 条 WS 协议（join/handle_info 贴合"命令→ack→事件"） |
+| HTTP/WS | **Phoenix 1.8 + Bandit** | Phoenix Channels 承载 3 条 WS 协议（join/handle_info 贴合"命令→ack→事件"）；1.8 为当前维护线（1.7 仅安全补丁） |
 | DB | **PostgreSQL**（现有实例）+ Ecto | `chat_v2.*`（业务）+ `public.users`（profile），同实例不同 schema |
 | 内部消息 | **Phoenix.PubSub**（本地） | per-channel / per-user topic |
 | JWT | `joken`（HS256） | 规则照抄 `src/auth/jwt.ts` |

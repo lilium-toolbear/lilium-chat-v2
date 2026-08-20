@@ -32,14 +32,14 @@ defmodule LiliumChat.MixProject do
   # Type `mix help deps` for examples and options.
   defp deps do
     [
-      {:phoenix, "~1.8.11"},
+      {:phoenix, "~> 1.8.11"},
       {:phoenix_ecto, "~> 4.5"},
       {:ecto_sql, "~> 3.10"},
       {:postgrex, ">= 0.0.0"},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
       {:jason, "~> 1.2"},
-      {:dns_cluster, "~0.2.0"},
+      {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       # Spec §2.1 / §6: auth, CORS, observability
       {:joken, "~> 2.6"}, # JWT (HS256) — rules copied from old src/auth/jwt.ts

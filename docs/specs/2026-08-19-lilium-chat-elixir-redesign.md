@@ -3,7 +3,7 @@
 状态：实现 spec（基于调研稿 + 决策访谈收敛）
 日期：2026-08-19
 前置：[`2026-08-19-elixir-rewrite-research.md`](./2026-08-19-elixir-rewrite-research.md)（调研稿，可行性论证）
-权威协议参考：[`docs/api-contract.md`](../../../lilium-chat/docs/api-contract.md)（旧 repo lilium-chat，v2.31，唯一 source of truth）
+权威协议参考：[`docs/api-contract.md`](../api-contract.md)（v2.31，唯一 source of truth；自旧 repo lilium-chat 复制，修订以旧 repo 为准后同步）
 代码位置：**本 repo（lilium-chat-v2）**（Elixir 应用 + conformance harness）；**旧 repo（lilium-chat）保留作参考** + 差分测试的旧实现目标
 
 ---
@@ -324,8 +324,8 @@ conformance 之外，加"**读路径无隐藏写 / 无扇出**"的观测断言�
 ## 9. 代码组织
 
 - **本 repo（lilium-chat-v2）**：Elixir 应用（`mix release`）+ conformance harness。
-- **旧 repo（lilium-chat）**：不动，作参考——contract 文档（`docs/api-contract.md`）+ 旧 Worker（供差分测试 `wrangler dev`）。
-- 本 repo 需本地引用旧 repo（clone/submodule/path）以跑 `wrangler dev` + 读 `docs/api-contract.md`。
+- **旧 repo（lilium-chat）**：不动，作参考——旧 Worker（供差分测试 `wrangler dev`）+ 其 contract 副本（修订基线）。
+- 本 repo 需本地引用旧 repo（clone/submodule/path）以跑 `wrangler dev`；contract 以本 repo `docs/api-contract.md` 为准。
 - 本 spec 位于新 repo `docs/specs/`；旧 repo 保留 contract + 旧实现作参考。
 
 ---

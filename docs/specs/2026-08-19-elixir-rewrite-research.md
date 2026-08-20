@@ -3,7 +3,7 @@
 状态：调研稿（research，非实现 spec）
 日期：2026-08-19
 范围：评估用 Elixir 重写 lilium-chat 后端（当前 CF Worker + 10 Durable Object），单机部署，协议兼容 drop-in replace
-权威协议参考：`docs/api-contract.md`（v2.31，唯一 source of truth）
+权威协议参考：`docs/api-contract.md`（v2.31，唯一 source of truth；自旧 repo lilium-chat 复制）
 
 ## 0. 摘要（TL;DR）
 

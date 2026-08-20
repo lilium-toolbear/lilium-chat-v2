@@ -12,7 +12,7 @@ protocol-compatible drop-in replace** for the Cloudflare Worker.
 
 | Layer | Choice |
 |---|---|
-| HTTP/WS | Phoenix 1.7 + Bandit |
+| HTTP/WS | Phoenix 1.8 + Bandit |
 | Runtime | Elixir 1.20 / OTP 29 |
 | DB | PostgreSQL 18 — business tables in schema `chat_v2`, profiles in `public.users`, same instance |
 | Internal messaging | Phoenix.PubSub (per-channel / per-user topics) |
@@ -55,6 +55,21 @@ podman compose run --rm app mix test
 podman compose up app        # foreground: mix phx.server on http://127.0.0.1:4000
 ```
 
+### Dev Container (alternative — VS Code / devcontainer CLI)
+
+`devcontainer.json` provides the **same dev environment** as a full IDE
+container (Elixir LSP + integrated terminal) — same images, DB creds, and
+hex/mix cache volumes. It is **development only**; production is `mix release`
++ systemd (spec §2.3).
+
+- VS Code: **Dev Containers: Reopen in Container**
+- CLI: `devcontainer up`
+
+On first create it installs hex/rebar, fetches deps, and creates + migrates
+the dev DB automatically. Then in the integrated terminal: `mix phx.server`,
+`mix test`, etc. It's an alternative to the podman workflow above — run one
+at a time to avoid host port conflicts on `:4000`.
+
 App: <http://127.0.0.1:4000> — `GET /api/chat/health` (liveness + DB check).
 
 ## Configuration
@@ -81,6 +96,7 @@ lib/lilium_chat_web/     endpoint, router (/api/chat/*), controllers
 priv/repo/migrations/    Ecto migrations → chat_v2 schema
 scripts/dev.{sh,ps1}     podman dev environment helpers
 docker-compose.yml       postgres:18 + elixir:1.20-otp-29 dev env
+devcontainer.json        dev container (VS Code / devcontainer CLI), same env
 docs/                    spec + api-contract (v2.31, SoT)
 ```
 

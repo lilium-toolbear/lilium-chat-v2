@@ -27,6 +27,7 @@ scripts/dev.sh psql             # psql -U chat -d lilium_chat_dev
 ```
 
 - Raw form: `podman compose run --rm app mix <task>` (env `DB_HOSTNAME=postgres` is set by compose; outside compose use `DB_HOSTNAME=localhost`).
+- `devcontainer.json` is an equivalent IDE dev container (VS Code / `devcontainer up`) — same images, DB creds, hex/mix cache volumes; dev-only, not production.
 
 ## Build & verification
 

@@ -1,0 +1,85 @@
+// lilium-chat-v2 — Dev Container
+//
+// DEVELOPMENT environment only (NOT production). Production is a
+// `mix release` single binary + systemd on gina (spec §2.3). This
+// container just gives you a working local dev loop:
+//
+//   Elixir 1.20 / OTP 29  +  PostgreSQL 18 sidecar  +  mounted workspace
+//
+// Use it:
+//   VS Code: "Dev Containers: Reopen in Container"
+//   CLI:     devcontainer up
+//
+// Deps + the dev DB are set up automatically on first create. After it
+// starts, in the integrated terminal:
+//   mix phx.server     # dev server → http://127.0.0.1:4000
+//   mix test
+//   mix ecto.setup     # drop/create + migrate the dev DB
+//
+// Mirrors docker-compose.yml (same images, DB creds, hex/mix cache
+// volumes) so the two dev workflows stay in sync. They are alternative
+// workflows — run one at a time to avoid host port conflicts on :4000.
+{
+  "name": "lilium-chat-v2 (dev)",
+
+  // Elixir 1.20 / OTP 29 — same runtime as docker-compose.yml (spec §2.1).
+  "image": "docker.io/library/elixir:1.20-otp-29",
+
+  "remoteUser": "root",
+  "workspaceFolder": "/workspace",
+
+  // PostgreSQL 18 sidecar (dev-only). PG 18+ uses the pg_ctlcluster layout,
+  // so data lives under /var/lib/postgresql (not the legacy /data path).
+  // Not published to the host, so it won't clash with compose's :5432.
+  "services": {
+    "postgres": {
+      "image": "docker.io/library/postgres:18",
+      "environment": {
+        "POSTGRES_USER": "chat",
+        "POSTGRES_PASSWORD": "chat",
+        "POSTGRES_DB": "lilium_chat_dev"
+      },
+      "healthcheck": {
+        "test": ["CMD-SHELL", "pg_isready -U chat -d lilium_chat_dev"],
+        "interval": "5s",
+        "timeout": "3s",
+        "retries": 20,
+        "start_period": "10s"
+      }
+    }
+  },
+
+  // Point the app at the postgres service. config/dev.exs reads DB_HOSTNAME
+  // and DB_PORT; username/password are the dev defaults "chat"/"chat".
+  "containerEnv": {
+    "DB_HOSTNAME": "postgres",
+    "DB_PORT": "5432"
+  },
+
+  // Cache hex packages + mix archives across container recreates (same
+  // named volumes as docker-compose.yml).
+  "mounts": [
+    "source=lilium_hex,target=/root/.hex,type=volume",
+    "source=lilium_mix,target=/root/.mix,type=volume"
+  ],
+
+  // One-time bootstrap: ensure hex/rebar, fetch deps, create + migrate dev DB.
+  "postCreateCommand": "mix local.hex --force && mix local.rebar --force && mix deps.get && mix ecto.create && mix ecto.migrate",
+
+  "forwardPorts": [4000],
+  "portsAttributes": {
+    "4000": { "label": "Phoenix dev server", "protocol": "http" }
+  },
+
+  // Keep the container (and its volumes) on close; don't purge.
+  "shutdownAction": "stopContainer",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "elixir-lsp.elixir-ls",
+        "meaksh.otp-ls"
+      ]
+    }
+  }
+}

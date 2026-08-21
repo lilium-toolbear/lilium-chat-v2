@@ -26,6 +26,7 @@ import { runScenario, collectKnownClientIds, type Endpoint } from "./runner.js";
 import { writeReports } from "./report.js";
 import type { Capture, Scenario } from "./types.js";
 import { bootstrapSendFanout } from "../scenarios/bootstrap-send-fanout.js";
+import { jwtAuthBoundaries } from "../scenarios/jwt-auth-boundaries.js";
 import { MockTarget } from "./targets/mock.js";
 import { WorkerTarget } from "./targets/worker.js";
 import { ElixirTarget } from "./targets/elixir.js";
@@ -37,6 +38,7 @@ const REPO_ROOT = resolve(CONFORMANCE_DIR, "..");
 
 const SCENARIOS: Record<string, Scenario> = {
   "bootstrap-send-fanout": bootstrapSendFanout,
+  "jwt-auth-boundaries": jwtAuthBoundaries,
 };
 
 const DEFAULT_JWT_SECRET = "test-jwt-secret-do-not-use-in-prod"; // old repo test secret

@@ -45,8 +45,30 @@ describe("normalizeCapture", () => {
     expect(body.at).toBe(PLACEHOLDER_TS);
     expect(body.ms).toBe(PLACEHOLDER_TS);
     expect(out.capturedAt).toBe(PLACEHOLDER_TS);
+  });
+
+  it("drops transport-level response headers (HTTP/1.1 framing, not API contract)", () => {
+    const cap = captureWith({});
+    const h = cap.steps[0]!.http!.response.headers as Record<string, string>;
+    h["cache-control"] = "max-age=0";
+    h["content-length"] = "42";
+    h["transfer-encoding"] = "chunked";
+    const out = normalizeCapture(cap);
     const headers = out.steps[0]!.http!.response.headers;
-    expect(headers.date).toBe(PLACEHOLDER_TS);
+    expect(headers.date).toBeUndefined();
+    expect(headers["cache-control"]).toBeUndefined();
+    expect(headers["content-length"]).toBeUndefined();
+    expect(headers["transfer-encoding"]).toBeUndefined();
+    // Semantic headers survive.
+    expect(headers["x-request-id"]).toBe("req_{{UUID}}");
+    expect(headers["content-type"]).toBe("application/json");
+  });
+
+  it("canonicalizes Vary (drops accept-encoding, case/order-insensitive)", () => {
+    const cap = captureWith({});
+    (cap.steps[0]!.http!.response.headers as Record<string, string>)["vary"] = "Accept-Encoding, Origin";
+    const out = normalizeCapture(cap);
+    expect(out.steps[0]!.http!.response.headers.vary).toBe("origin");
   });
 
   it("normalizes req_<uuidv7> request ids", () => {

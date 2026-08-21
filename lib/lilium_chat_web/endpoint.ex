@@ -32,17 +32,14 @@ defmodule LiliumChatWeb.Endpoint do
     plug Phoenix.Ecto.CheckRepoStatus, otp_app: :lilium_chat
   end
 
-  plug Plug.RequestId
+  # X-Request-Id (req_<uuidv7>) for /api/chat/* — old src/index.ts middleware.
+  plug LiliumChatWeb.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
-  # CORS — origin whitelist from config :lilium_chat, :cors, origins
-  # (copied from the old repo src/allowed-origins.ts, spec §6.3).
-  plug Corsica,
-    origins: Application.compile_env(:lilium_chat, :cors)[:origins],
-    methods: [:get, :post, :put, :patch, :delete, :options],
-    headers: [:authorization, :content_type, :idempotency_key, :x_request_id],
-    expose_headers: [:x_request_id],
-    max_age: 86_400
+  # CORS — hono-parity plug (issue #2); origin whitelist from config
+  # :lilium_chat, :cors, origins (copied from the old repo
+  # src/allowed-origins.ts, spec §6.3).
+  plug LiliumChatWeb.CORS
 
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],

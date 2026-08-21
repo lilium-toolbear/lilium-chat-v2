@@ -173,9 +173,14 @@ export async function runScenario(scenario: Scenario, endpoint: Endpoint, opts: 
   const socketFailedActors = new Set<string>();
 
   // Mint actor tokens once per run (volatile; masked by the normalizer).
+  const nowSec = Math.floor(Date.now() / 1000);
   const tokens = new Map<string, string>();
   for (const [actorName, actor] of Object.entries(scenario.actors)) {
-    tokens.set(actorName, await makeJwt(opts.jwtSecret, { sub: actor.userId, claims: actor.jwtClaims }));
+    tokens.set(actorName, await makeJwt(opts.jwtSecret, {
+      sub: actor.userId,
+      claims: actor.jwtClaims,
+      exp: actor.jwtExpSeconds !== undefined ? nowSec + actor.jwtExpSeconds : undefined,
+    }));
   }
 
   const waitMs = opts.waitTimeoutMs ?? DEFAULT_WAIT_MS;
@@ -370,11 +375,16 @@ async function runHttpStep(
   try {
     path = interpolateString(stepDef.path, vars);
     body = stepDef.body === undefined ? undefined : interpolateDeep(stepDef.body, vars);
+    const rawHeaders = stepDef.headers ?? {};
+    // `null` value = header explicitly omitted (e.g. Authorization: null).
     headers = Object.fromEntries(
-      Object.entries(stepDef.headers ?? {}).map(([k, v]) => [k, interpolateString(v, vars)]),
+      Object.entries(rawHeaders)
+        .filter(([, v]) => v !== null)
+        .map(([k, v]) => [k, interpolateString(v as string, vars)]),
     );
+    const authExplicit = "Authorization" in rawHeaders || "authorization" in rawHeaders;
     const token = tokens.get(stepDef.actor);
-    if (token && !headers.Authorization && !headers.authorization) {
+    if (token && !authExplicit) {
       headers.Authorization = `Bearer ${token}`;
     }
     if (!headers.Origin && !headers.origin) headers.Origin = origin;

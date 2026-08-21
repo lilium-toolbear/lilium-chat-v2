@@ -8,6 +8,13 @@
  *   - `req_<uuidv7>` request ids        → `req_{{UUID}}`
  *   - `Authorization: Bearer <jwt>`     → `{{JWT}}` (header values only)
  *
+ * TRANSPORT-level response headers are dropped from BOTH captures before
+ * diffing — they are HTTP/1.1 framing / server-framework details, not API
+ * contract (miniflare vs Bandit legitimately differ):
+ *   - cache-control, content-length, date, transfer-encoding → removed
+ *   - vary → `accept-encoding` component dropped (gzip capability), the rest
+ *     compared case-insensitively as a sorted set (CORS-relevant parts stay)
+ *
  * Client-generated ids (command_id, Idempotency-Key, actor user ids, and any
  * other UUID literals written in the scenario script itself) are NOT
  * normalized: they are deterministic inputs that both targets must echo
@@ -103,6 +110,37 @@ function normalizeDeep(
   return value;
 }
 
+/** HTTP/1.1 framing / server-framework headers — not API contract (see module doc). */
+const TRANSPORT_HEADERS = new Set(["cache-control", "content-length", "date", "transfer-encoding"]);
+
+/**
+ * `Vary` normalization: drop the `accept-encoding` component (gzip capability
+ * differs per server), compare the rest case-insensitively as a sorted set so
+ * header order never diffs. CORS-relevant components (e.g. `origin`) survive.
+ */
+function normalizeVary(value: string): string {
+  return value
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length > 0 && s !== "accept-encoding")
+    .sort()
+    .join(", ");
+}
+
+/** Normalize a RESPONSE header map: transport headers dropped, vary canonicalized. */
+function normalizeResponseHeaders(
+  headers: Record<string, string>,
+  opts: NormalizeOptions,
+): Record<string, string> {
+  const normalized = normalizeDeep(headers, opts, "header") as Record<string, string>;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(normalized)) {
+    if (TRANSPORT_HEADERS.has(k)) continue;
+    out[k] = k === "vary" ? normalizeVary(v) : v;
+  }
+  return out;
+}
+
 /** Normalize one capture: header maps get header context, bodies get body context. */
 export function normalizeCapture(capture: Capture, opts: NormalizeOptions = {}): Capture {
   const steps = capture.steps.map((step) => {
@@ -117,7 +155,7 @@ export function normalizeCapture(capture: Capture, opts: NormalizeOptions = {}):
         },
         response: {
           status: step.http.response.status,
-          headers: normalizeDeep(step.http.response.headers, opts, "header") as Record<string, string>,
+          headers: normalizeResponseHeaders(step.http.response.headers, opts),
           body: normalizeDeep(step.http.response.body, opts, "body"),
         },
       };

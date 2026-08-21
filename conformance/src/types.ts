@@ -23,6 +23,11 @@ export interface ActorSpec {
   userId: string;
   /** Extra JWT claims beyond `sub` (e.g. `{ admin: true }`). */
   jwtClaims?: Record<string, unknown>;
+  /**
+   * Relative `exp` offset in seconds from mint time (e.g. `-3600` for an
+   * already-expired token). Omitted → default 1h validity.
+   */
+  jwtExpSeconds?: number;
 }
 
 interface BaseStep {
@@ -37,7 +42,12 @@ export interface HttpStep extends BaseStep {
   /** Path (may contain `${var}` interpolation), e.g. `/api/chat/bootstrap`. */
   path: string;
   body?: unknown;
-  headers?: Record<string, string>;
+  /**
+   * Request headers. A value of `null` marks the header as EXPLICITLY
+   * omitted — notably `Authorization: null` suppresses the actor's default
+   * Bearer token (unauthenticated request, contract §2.1).
+   */
+  headers?: Record<string, string | null>;
   /**
    * Optional retry loop for async projections (e.g. channel list after
    * create). Re-executes until the predicate passes or `maxAttempts` is

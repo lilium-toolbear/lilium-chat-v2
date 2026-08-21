@@ -35,19 +35,24 @@ defmodule LiliumChat.MixProject do
       {:phoenix, "~> 1.8.11"},
       {:phoenix_ecto, "~> 4.5"},
       {:ecto_sql, "~> 3.10"},
-      {:postgrex, "~> 0.22"}, # lock to 0.22.x (1.0.0-rc.1 is pre-release)
+      # lock to 0.22.x (1.0.0-rc.1 is pre-release)
+      {:postgrex, "~> 0.22"},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
-      # Spec §2.1 / §6: auth, CORS, observability
-      {:joken, "~> 2.6"}, # JWT (HS256) — rules copied from old src/auth/jwt.ts
-      {:corsica, "~> 2.1"}, # CORS — origin whitelist copied from old src/allowed-origins.ts
-      {:sentry, "~> 13.0"}, # Sentry (spec §10)
-      {:finch, "~> 0.23"}, # HTTP client required by Sentry 13.x (Sentry.FinchClient)
-      {:prometheus, "~> 6.1"}, # Telemetry → Prometheus (spec §10)
-      {:prometheus_ex, "~> 5.1"} # telemetry collection (Phoenix events) + /metrics plug
+      # Spec §2.1 / §6: auth, observability
+      # JWT (HS256) — rules copied from old src/auth/jwt.ts
+      {:joken, "~> 2.6"},
+      # Sentry (spec §10)
+      {:sentry, "~> 13.0"},
+      # HTTP client required by Sentry 13.x (Sentry.FinchClient)
+      {:finch, "~> 0.23"},
+      # Telemetry → Prometheus (spec §10)
+      {:prometheus, "~> 6.1"},
+      # telemetry collection (Phoenix events) + /metrics plug
+      {:prometheus_ex, "~> 5.1"}
     ]
   end
 

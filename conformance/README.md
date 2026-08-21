@@ -29,6 +29,12 @@ report (reports/*.txt|json) + exit code: 0 = parity, 1 = diff/observation fail, 
 | `req_<uuidv7>` request id（header + body） | `req_{{UUID}}` |
 | `Authorization: Bearer <jwt>`（仅 header 值） | `{{JWT}}` |
 
+**传输层响应头两侧都剔除**（HTTP/1.1 framing / 服务器框架差异，非 API 契约——
+miniflare 与 Bandit 合法不同）：`cache-control`、`content-length`、`date`、
+`transfer-encoding` 直接丢弃；`vary` 去掉 `accept-encoding` 分量后按集合大小写不敏感
+比较（CORS 相关的 `origin` 等分量保留）。语义头（status / content-type /
+x-request-id / access-control-*）仍严格 diff。
+
 **客户端生成的 id 不归一化**：scenario 里写死的 `command_id`、`Idempotency-Key`、
 actor user id（插值前的静态 UUID 字面量 + actor 定义，见
 `collectKnownClientIds`）。它们是确定性输入，两边必须原样回显——回显不一致就是
@@ -85,6 +91,22 @@ WS event message.created（**1 条 fanout**，best-effort §10.5）
 GET /bootstrap?channel_id=…（post-state, read probe）
 ```
 
+## Scenario：`jwt-auth-boundaries`（issue #2 验收 A6，contract §2.1）
+
+```
+GET /channels  valid user token          → 200 空态 shape
+GET /channels  admin claim               → 200（与 user 同形）
+GET /channels  client_id present         → 401 MACHINE_TOKEN_NOT_ALLOWED
+GET /channels  managed_session === true  → 403 SESSION_NOT_ALLOWED
+GET /channels  owner_user_id mismatch    → 403 SESSION_NOT_ALLOWED
+GET /channels  无 Authorization（null）   → 401 UNAUTHORIZED "Not authenticated"
+GET /channels  malformed bearer          → 401 UNAUTHORIZED "Invalid or expired token"
+GET /channels  exp < now（jwtExpSeconds）→ 401 UNAUTHORIZED "Invalid or expired token"
+```
+
+harness DSL：actor `jwtExpSeconds`（相对 exp 偏移，负数=已过期）；step header
+值 `null` = 显式省略（`Authorization: null` 抑制 actor 默认 Bearer）。
+
 ## 读路径观测断言（spec §7.5 / D15 / A12）
 
 标记 `readProbe` 的 step（两个 bootstrap GET）在 Elixir target 上自动包一层 PG 级观测：
@@ -100,9 +122,11 @@ GET /bootstrap?channel_id=…（post-state, read probe）
 ## 当前 go/no-go 语义
 
 - `worker,worker` 自比空 diff = **机制 GO**（归一化完备、capture/diff 无误报）。
-- `worker,elixir` 双跑 = parity 现状：新 Elixir 尚未实现 #2/#5/#8/#9，diff 会如实
-  列出缺口（404/缺帧）；随各 issue 落地 diff 收敛。cutover 门槛（spec §12）=
-  conformance 全绿 + diff 空（除归一化字段）+ S3 E2E + 读路径观测达标。
+- `worker,elixir` 双跑 = parity 现状：HTTP 公共层（issue #2：JWT 鉴权 / 错误契约 /
+  CORS / X-Request-Id）已有 `jwt-auth-boundaries` 场景 **GO**；#5/#8/#9 等未落地，
+  `bootstrap-send-fanout` 双跑 diff 会如实列出缺口（404/缺帧）；随各 issue 落地 diff
+  收敛。cutover 门槛（spec §12）= conformance 全绿 + diff 空（除归一化字段）+ S3 E2E
+  + 读路径观测达标。
 
 ## 已知限制 / 后续
 

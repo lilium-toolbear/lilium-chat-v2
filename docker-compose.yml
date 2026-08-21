@@ -45,6 +45,9 @@ services:
     environment:
       DB_HOSTNAME: postgres
       DB_PORT: "5432"
+      # Default matches the conformance harness (old-repo test secret) so the
+      # worker,elixir parity gate works out of the box; override via env.
+      JWT_SECRET: "${JWT_SECRET:-test-jwt-secret-do-not-use-in-prod}"
     ports:
       - "4000:4000"
     volumes:

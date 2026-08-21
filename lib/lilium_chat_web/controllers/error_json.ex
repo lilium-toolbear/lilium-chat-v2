@@ -1,21 +1,29 @@
 defmodule LiliumChatWeb.ErrorJSON do
   @moduledoc """
-  This module is invoked by your endpoint in case of errors on JSON requests.
+  Endpoint-level error fallback (issue #2).
 
-  See config/config.exs.
+  Invoked by the Phoenix endpoint when an exception escapes the plug chain
+  (e.g. a malformed request body raised by `Plug.Parsers`). Renders the
+  contract envelope (contract §2.6):
+
+    * `LiliumChat.Errors.ApiError` reasons → their own code/status/message;
+    * anything else → `CHAT_WORKER_UNAVAILABLE` (old Worker `app.onError`
+      fallback semantics).
+
+  Handler-level exceptions are normally caught earlier by controller `rescue`
+  clauses via `LiliumChatWeb.ErrorHandler.render_exception/2`; this module is
+  the last-resort net so the wire shape never deviates from the contract.
   """
 
-  # If you want to customize a particular status code,
-  # you may add your own clauses, such as:
-  #
-  # def render("500.json", _assigns) do
-  #   %{errors: %{detail: "Internal Server Error"}}
-  # end
+  alias LiliumChat.Errors
 
-  # By default, Phoenix returns the status message from
-  # the template name. For example, "404.json" becomes
-  # "Not Found".
-  def render(template, _assigns) do
-    %{errors: %{detail: Phoenix.Controller.status_message_from_template(template)}}
+  def render(_template, assigns) do
+    api_error =
+      case Map.fetch(assigns, :reason) do
+        {:ok, %Errors.ApiError{} = e} -> e
+        _ -> Errors.new("CHAT_WORKER_UNAVAILABLE")
+      end
+
+    Errors.envelope(api_error, LiliumChatWeb.RequestId.current())
   end
 end

@@ -70,7 +70,7 @@ the dev DB automatically. Then in the integrated terminal: `mix phx.server`,
 `mix test`, etc. It's an alternative to the podman workflow above — run one
 at a time to avoid host port conflicts on `:4000`.
 
-App: <http://127.0.0.1:4000> — `GET /api/chat/health` (liveness + DB check).
+App: <http://127.0.0.1:4000> — `GET /health` (liveness + DB check, unauthenticated ops probe).
 
 ## Configuration
 

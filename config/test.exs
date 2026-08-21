@@ -16,8 +16,7 @@ config :lilium_chat, LiliumChat.Repo,
   pool_size: System.schedulers_online() * 2
 
 # ToolBear JWT secret for tests (spec §6.1).
-config :lilium_chat, :jwt,
-  secret: System.get_env("JWT_SECRET") || "test-only-jwt-secret"
+config :lilium_chat, :jwt, secret: System.get_env("JWT_SECRET") || "test-only-jwt-secret"
 
 # We don't run a server during test. If one is required,
 # you can enable the server option below.

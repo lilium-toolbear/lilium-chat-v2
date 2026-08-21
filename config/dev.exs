@@ -8,12 +8,16 @@ import Config
 # Business tables live in schema `chat_v2` (spec §3); `public.users`
 # (profiles) is queried with an explicit `prefix: "public"` on the same
 # Repo/connection (spec §4: reads hit one PG instance).
+# DB_* env overrides exist for the cutover tools (issue #4): pointing dev at
+# the live archive DB (e.g. DB_HOSTNAME=192.168.10.13 DB_USERNAME=dzmm
+# DB_PASSWORD=... DB_NAME=dzmm) lets `mix lilium_chat.import/export` run
+# against production data without a separate env config.
 config :lilium_chat, LiliumChat.Repo,
-  username: "chat",
-  password: "chat",
+  username: System.get_env("DB_USERNAME") || "chat",
+  password: System.get_env("DB_PASSWORD") || "chat",
   hostname: System.get_env("DB_HOSTNAME") || "localhost",
   port: String.to_integer(System.get_env("DB_PORT") || "5432"),
-  database: "lilium_chat_dev",
+  database: System.get_env("DB_NAME") || "lilium_chat_dev",
   prefix: "chat_v2",
   stacktrace: true,
   show_sensitive_data_on_connection_error: true,

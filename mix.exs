@@ -65,9 +65,21 @@ defmodule LiliumChat.MixProject do
   defp aliases do
     [
       setup: ["deps.get", "ecto.setup"],
-      "ecto.setup": ["ecto.create", "ecto.migrate", "run priv/repo/seeds.exs"],
+      # Migrations run under the chat_v2 prefix (spec §3); Ecto 3.14 needs
+      # the schema to exist before creating chat_v2.schema_migrations.
+      "ecto.setup": [
+        "ecto.create",
+        "lilium_chat.create_schema",
+        "ecto.migrate --prefix chat_v2",
+        "run priv/repo/seeds.exs"
+      ],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
-      test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"]
+      test: [
+        "ecto.create --quiet",
+        "lilium_chat.create_schema",
+        "ecto.migrate --prefix chat_v2 --quiet",
+        "test"
+      ]
     ]
   end
 end

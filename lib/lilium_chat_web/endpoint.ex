@@ -11,9 +11,17 @@ defmodule LiliumChatWeb.Endpoint do
     same_site: "Lax"
   ]
 
-  # socket "/live", Phoenix.LiveView.Socket,
-  #   websocket: [connect_info: [session: @session_options]],
-  #   longpoll: [connect_info: [session: @session_options]]
+  # Browser WS (contract §10.1, issue #8): /api/chat/ws
+  # Subprotocol: lilium.chat.v2 + bearer.<jwt>
+  # Origin: checked by transport via check_origin (CORS whitelist).
+  # JWT: verified in BrowserSocket.connect/3.
+  socket "/api/chat/ws", LiliumChatWeb.BrowserSocket,
+    websocket: [
+      subprotocols: ["lilium.chat.v2"],
+      check_origin:
+        Application.compile_env(:lilium_chat, :cors, %{})[:origins] || [],
+      connect_info: [:sec_websocket_headers]
+    ]
 
   # Serve at "/" the static files from "priv/static" directory.
   #

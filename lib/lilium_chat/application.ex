@@ -17,6 +17,8 @@ defmodule LiliumChat.Application do
       LiliumChat.Repo,
       {DNSCluster, query: Application.get_env(:lilium_chat, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: LiliumChat.PubSub},
+      # ETS membership-version cache (spec D8 / §5.2, issue #8)
+      LiliumChat.MembershipCache,
       # Start a worker by calling: LiliumChat.Worker.start_link(arg)
       # {LiliumChat.Worker, arg},
       # Start to serve requests, typically the last entry

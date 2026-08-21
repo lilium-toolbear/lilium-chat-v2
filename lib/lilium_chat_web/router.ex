@@ -29,6 +29,7 @@ defmodule LiliumChatWeb.Router do
   scope "/api/chat", LiliumChatWeb do
     pipe_through :browser_api
 
+    get "/bootstrap", BootstrapController, :show
     get "/channels", ChannelsController, :index
   end
 

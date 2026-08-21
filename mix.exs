@@ -49,10 +49,12 @@ defmodule LiliumChat.MixProject do
       {:sentry, "~> 13.0"},
       # HTTP client required by Sentry 13.x (Sentry.FinchClient)
       {:finch, "~> 0.23"},
-      # Telemetry → Prometheus (spec §10)
-      {:prometheus, "~> 6.1"},
-      # telemetry collection (Phoenix events) + /metrics plug
-      {:prometheus_ex, "~> 5.1"}
+      # Telemetry.Metrics → Prometheus reporter (spec §10 / D18). Core only —
+      # we scrape via `TelemetryMetricsPrometheus.Core.scrape/1` inside the app's
+      # own router (/metrics) instead of running a second HTTP listener.
+      {:telemetry_metrics_prometheus_core, "~> 1.0"},
+      # JSON structured logging (spec D18 / §10)
+      {:logger_json, "~> 7.0"}
     ]
   end
 

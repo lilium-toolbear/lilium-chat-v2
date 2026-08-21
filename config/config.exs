@@ -22,10 +22,11 @@ config :lilium_chat, LiliumChatWeb.Endpoint,
   pubsub_server: LiliumChat.PubSub,
   live_view: [signing_salt: "DRxIluGE"]
 
-# Configures Elixir's Logger
-config :logger, :console,
-  format: "$time $metadata[$level] $message\n",
-  metadata: [:request_id]
+# Structured JSON logging (spec D18 / §10): one JSON object per line with
+# time / severity / message / metadata. `request_id` is included so log
+# lines correlate with the X-Request-Id response header (issue #2 handoff).
+config :logger, :default_handler,
+  formatter: {LoggerJSON.Formatters.Basic, metadata: [:request_id]}
 
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason

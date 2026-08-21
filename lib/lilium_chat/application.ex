@@ -7,6 +7,11 @@ defmodule LiliumChat.Application do
 
   @impl true
   def start(_type, _args) do
+    # Observability telemetry handlers (per-request PG statement counting,
+    # spec §4/A12/issue #3) must be attached before any child can emit
+    # events. Idempotent across app restarts in the same VM (tests).
+    LiliumChat.Observability.attach()
+
     children = [
       LiliumChatWeb.Telemetry,
       LiliumChat.Repo,

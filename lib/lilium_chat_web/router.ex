@@ -18,10 +18,12 @@ defmodule LiliumChatWeb.Router do
     plug LiliumChatWeb.AuthPlug
   end
 
-  # Ops probe (non-API path): liveness + DB check. Unauthenticated and outside
-  # the /api/chat/* middleware scope (no JWT, no X-Request-Id/CORS headers) —
-  # health checks are not part of the Browser/Bot API contract.
+  # Ops probes (non-API paths): liveness + DB check, and the Prometheus
+  # scrape endpoint (spec §10 / D18). Unauthenticated and outside the
+  # /api/chat/* middleware scope (no JWT, no X-Request-Id/CORS headers) —
+  # ops probes are not part of the Browser/Bot API contract.
   get "/health", LiliumChatWeb.HealthController, :show
+  get "/metrics", LiliumChatWeb.MetricsController, :index
 
   # Contract routes under /api/chat/* (issue #2: common layer + tracer bullet).
   scope "/api/chat", LiliumChatWeb do

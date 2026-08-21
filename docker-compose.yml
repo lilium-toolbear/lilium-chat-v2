@@ -20,6 +20,8 @@ services:
       POSTGRES_DB: lilium_chat_dev
     ports:
       - "${DB_PORT:-5432}:5432"
+    # Needed by the conformance read-path probe (spec §7.5 query-count bound).
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
     # PG 18+ stores data under /var/lib/postgresql/<version> (pg_ctlcluster
     # layout) — mount the parent dir, not the old /data path.
     volumes:

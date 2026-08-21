@@ -1,0 +1,64 @@
+{
+  // Local conformance config for the OLD Worker (spec §7.1a).
+  // Referenced in place from lilium-chat — nothing in that repo is modified.
+  // `main` points at the old entrypoint; Hyperdrive connects to the shared
+  // dev PG (profile resolution, src/profile/resolve.ts) instead of the real
+  // Cloudflare binding. Mirrors wrangler.test.jsonc from the old repo.
+  // Paths are relative to THIS config file (conformance/): the old repo sits
+  // at ../../lilium-chat (sibling of lilium-chat-v2).
+  "$schema": "../../lilium-chat/node_modules/wrangler/config-schema.json",
+  "name": "lilium-chat-conformance",
+  "main": "../../lilium-chat/src/index.ts",
+  "compatibility_date": "2026-06-22",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+
+  "vars": {
+    "API_BASE_URL": "https://lilium.kuma.homes",
+    "S3_ENDPOINT": "https://s3.kuma.homes",
+    "S3_BUCKET": "s3.kuma.homes",
+    "S3_PUBLIC_BASE": "https://s3.kuma.homes",
+    "S3_REGION": "us-east-1",
+    "SENTRY_ENVIRONMENT": "conformance",
+    "ALLOW_INTERNAL_TEST_ROUTES": "1"
+  },
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "CHAT_CHANNEL", "class_name": "ChatChannel" },
+      { "name": "USER_DIRECTORY", "class_name": "UserDirectory" },
+      { "name": "USER_CONNECTION", "class_name": "UserConnection" },
+      { "name": "CHANNEL_DIRECTORY", "class_name": "ChannelDirectory" },
+      { "name": "INVITE_DIRECTORY", "class_name": "InviteDirectory" },
+      { "name": "BOT_REGISTRY", "class_name": "BotRegistry" },
+      { "name": "CHANNEL_FANOUT", "class_name": "ChannelFanout" },
+      { "name": "BOT_CONNECTION", "class_name": "BotConnection" },
+      { "name": "BOT_STREAM_CONNECTION", "class_name": "BotStreamConnection" },
+      { "name": "DM_DIRECTORY", "class_name": "DMDirectory" }
+    ]
+  },
+
+  "hyperdrive": [
+    {
+      "binding": "LILIUM_DB",
+      "id": "<local-only>",
+      // Shared dev PG (lilium-chat-v2 docker-compose postgres:18).
+      "localConnectionString": "postgres://chat:chat@localhost:5432/lilium_chat_dev"
+    }
+  ],
+
+  "queues": {
+    "producers": [{ "binding": "CHAT_ARCHIVE_QUEUE", "queue": "lilium-chat-archive" }]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "ChatChannel", "UserDirectory", "UserConnection", "ChannelDirectory",
+        "InviteDirectory", "BotRegistry", "ChannelFanout", "BotConnection",
+        "BotStreamConnection", "DMDirectory"
+      ]
+    }
+  ]
+}

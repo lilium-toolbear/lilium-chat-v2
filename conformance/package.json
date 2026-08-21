@@ -1,0 +1,25 @@
+{
+  "name": "lilium-conformance",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Conformance differential harness (spec §7 / issue #1): runs the same scenario script against the old Cloudflare Worker (wrangler dev, clean miniflare state) and the new Elixir app (clean PG chat_v2.*), captures all HTTP/WS responses, normalizes volatile fields to {{UUID}}/{{TS}} placeholders, and diffs the two captures. Go/no-go gate for cutover parity.",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "conformance": "node --import tsx src/cli.ts"
+  },
+  "dependencies": {
+    "jose": "^6.0.0",
+    "pg": "^8.16.3",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "@types/pg": "^8.23.1",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0"
+  }
+}

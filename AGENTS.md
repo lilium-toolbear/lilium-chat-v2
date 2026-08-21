@@ -37,6 +37,16 @@ mix compile --warnings-as-errors   # required before claiming done
 mix test
 ```
 
+Conformance harness (spec §7 / issue #1) lives in `conformance/` (Node, not Elixir):
+
+```bash
+cd conformance && npm test                              # mock self-diff (CI)
+npm run conformance -- run --targets worker,worker      # old-Worker self-diff
+npm run conformance -- run --targets worker,elixir      # parity gate
+```
+
+See `conformance/README.md`.
+
 ## Load-bearing invariants (from spec + contract)
 
 - **Wire shape**: 50 HTTP routes + 3 WS protocols + 68 error codes + envelope

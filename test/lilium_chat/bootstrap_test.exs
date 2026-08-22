@@ -33,7 +33,8 @@ defmodule LiliumChat.BootstrapTest do
     result = Bootstrap.fetch(@user_id, nil)
 
     assert result["me"]["user_id"] == @user_id
-    assert result["me"]["display_name"] == "user-6f1e2c3d"  # fallback
+    # fallback
+    assert result["me"]["display_name"] == "user-6f1e2c3d"
     assert result["me"]["avatar_url"] == nil
     assert result["channels"] == []
     assert result["active_channel"] == nil
@@ -46,7 +47,8 @@ defmodule LiliumChat.BootstrapTest do
     {result, stats} = ReadPath.run(fn -> Bootstrap.fetch(@user_id, nil) end)
 
     assert stats.writes == 0
-    assert stats.reads > 0  # at least the main channel query
+    # at least the main channel query
+    assert stats.reads > 0
     assert result["channels"] == []
   end
 
@@ -167,8 +169,14 @@ defmodule LiliumChat.BootstrapTest do
 
     manifest = result["command_manifest"]
     assert manifest != nil
-    assert manifest["version"] == 1
-    assert length(manifest["items"]) == 1
+    # version comes from channels.command_manifest_version (0 for a freshly
+    # seeded channel — the binding was inserted directly, not via update).
+    assert manifest["version"] == 0
+    # full bootstrap manifest = allowed binding + platform /help (the member
+    # role does not get /permission).
+    names = manifest["items"] |> Enum.map(& &1["name"]) |> Enum.sort()
+    assert "help" in names
+    assert length(manifest["items"]) == 2
   end
 
   test "DM channel: channel_pins always empty" do
@@ -309,12 +317,25 @@ defmodule LiliumChat.BootstrapTest do
     bot_id = Ecto.UUID.generate()
     cmd_id = Ecto.UUID.generate()
 
+    snapshot =
+      %{
+        "bot_command_id" => cmd_id,
+        "name" => "/test",
+        "aliases" => [],
+        "description" => "Test command",
+        "help_text" => "help text",
+        "bot" => %{"bot_id" => bot_id, "display_name" => "Test Bot", "avatar_url" => nil},
+        "options" => [],
+        "default_member_permission" => "member",
+        "execution" => %{"mode" => "stateless"}
+      }
+
     Repo.query!(
       """
       INSERT INTO chat_v2.bot_commands (bot_command_id, bot_id, name, description, options_json,
         default_member_permission, schema_version, definition_hash, created_at,
         updated_at, execution_mode, status, help_text)
-      VALUES ($1, $2, '/test', 'Test command', '{}', NULL, 1, 'hash', $3, $3,
+      VALUES ($1, $2, '/test', 'Test command', '{}', 'member', 1, 'hash', $3, $3,
         'stateless', 'active', 'help text')
       """,
       [cmd_id, bot_id, now],
@@ -326,9 +347,9 @@ defmodule LiliumChat.BootstrapTest do
       INSERT INTO chat_v2.channel_command_bindings (channel_id, bot_command_id, bot_id, status,
         permission_override, command_snapshot_json, stateful_max_ttl_seconds,
         updated_by_user_id, updated_at)
-      VALUES ($1, $2, $3, 'active', NULL, '{}', NULL, $4, $5)
+      VALUES ($1, $2, $3, 'allowed', NULL, $4, NULL, $5, $6)
       """,
-      [channel_id, cmd_id, bot_id, @user_id, now],
+      [channel_id, cmd_id, bot_id, snapshot, @user_id, now],
       type: true
     )
   end

@@ -20,14 +20,15 @@ defmodule LiliumChat.Bootstrap do
   Reads are strictly read-only (no hidden writes).
   """
 
-  alias LiliumChat.Repo
+  alias LiliumChat.{ChannelCommands, Repo}
 
   @profile_batch_size 50
   @bootstrap_message_limit 50
 
   # ------------------------------------------------------------------ types
 
-  @type identity :: String.t()  # user_id
+  # user_id
+  @type identity :: String.t()
   @type params :: %{channel_id: String.t() | nil}
   @type response :: map()
 
@@ -79,13 +80,18 @@ defmodule LiliumChat.Bootstrap do
           end
       end
 
-    # 5. Command manifest (one query, only when channel_id was explicitly
-    #    requested AND the active channel matches AND kind != "dm")
+    # 5. Command manifest (only when channel_id was explicitly requested AND
+    #    the active channel matches AND kind != "dm"). Same merged shape as
+    #    `GET /channels/{id}/commands` (issue #16); failures swallow to a
+    #    missing key, matching the old Worker's bootstrap.
     command_manifest =
       if requested_channel_id && active_channel &&
            active_channel["channel_id"] == requested_channel_id &&
            active_channel["kind"] != "dm" do
-        query_command_manifest(active_channel["channel_id"])
+        case ChannelCommands.full(user_id, active_channel["channel_id"]) do
+          {:ok, manifest} -> manifest
+          {:error, _} -> nil
+        end
       else
         nil
       end
@@ -275,66 +281,6 @@ defmodule LiliumChat.Bootstrap do
     end
   end
 
-  @doc """
-  Query the command manifest for a channel (one SQL query).
-  Returns `%{version: 1, items: [...]}` or nil if no commands.
-  """
-  def query_command_manifest(channel_id) do
-    query = """
-    SELECT
-      bc.bot_command_id,
-      bc.bot_id,
-      bc.name,
-      bc.description,
-      bc.options_json,
-      bc.schema_version,
-      bc.definition_hash,
-      bc.execution_mode,
-      bc.status,
-      bc.help_text,
-      bcc.status AS binding_status,
-      bcc.permission_override
-    FROM chat_v2.channel_command_bindings bcc
-    JOIN chat_v2.bot_commands bc ON bc.bot_command_id = bcc.bot_command_id
-    WHERE bcc.channel_id = $1
-      AND bcc.status = 'active'
-      AND bc.status = 'active'
-      AND bc.deleted_at IS NULL
-    ORDER BY bc.name ASC
-    """
-
-    case Repo.query(query, [channel_id], type: true) do
-      {:ok, result} ->
-        maps = rows_to_maps(result)
-
-        if maps == [] do
-          nil
-        else
-          items =
-            Enum.map(maps, fn row ->
-              %{
-                "bot_command_id" => row["bot_command_id"],
-                "bot_id" => row["bot_id"],
-                "name" => row["name"],
-                "description" => row["description"],
-                "options" => row["options_json"] || %{},
-                "schema_version" => row["schema_version"],
-                "definition_hash" => row["definition_hash"],
-                "execution_mode" => row["execution_mode"],
-                "status" => row["status"],
-                "help_text" => row["help_text"],
-                "permission" => row["permission_override"] || "default"
-              }
-            end)
-
-          %{"version" => 1, "items" => items}
-        end
-
-      {:error, _} ->
-        nil
-    end
-  end
-
   # ------------------------------------------------------- profile batch
 
   @doc """
@@ -474,7 +420,8 @@ defmodule LiliumChat.Bootstrap do
     # Full computation (count events after last_read) can be refined in Phase 1.
     case row["last_read_event_id"] do
       nil -> 0
-      _ -> 0  # TODO(Phase 1): COUNT events WHERE event_id > last_read_event_id
+      # TODO(Phase 1): COUNT events WHERE event_id > last_read_event_id
+      _ -> 0
     end
   end
 

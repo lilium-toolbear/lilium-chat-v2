@@ -19,6 +19,13 @@ defmodule LiliumChatWeb.Router do
     plug LiliumChatWeb.AuthPlug
   end
 
+  # Bot-token API (contract §9.3): `Authorization: Bearer <bot_token>` instead
+  # of the browser JWT; scopes enforced per route (BotAuthPlug).
+  pipeline :bot_api do
+    plug Plug.Parsers, parsers: [:json], pass: ["*/*"], json_decoder: Jason
+    plug LiliumChatWeb.BotAuthPlug
+  end
+
   # Ops probes (non-API paths): liveness + DB check, and the Prometheus
   # scrape endpoint (spec §10 / D18). Unauthenticated and outside the
   # /api/chat/* middleware scope (no JWT, no X-Request-Id/CORS headers) —
@@ -44,6 +51,38 @@ defmodule LiliumChatWeb.Router do
     # Attachment upload (contract §8.1–§8.2, spec §6.2, issue #14 / C7)
     post "/uploads/images/presign", UploadsController, :presign
     post "/uploads/images/:attachment_id/finalize", UploadsController, :finalize
+
+    # Bot domain (contract §9.3/§9.10/§9.11, issue #16): developer + admin
+    # Bots API (browser JWT), channel command manifest/binding, directory.
+    post "/bots", BotsController, :create
+    get "/bots", BotsController, :index
+    get "/bots/:bot_id", BotsController, :show
+    patch "/bots/:bot_id", BotsController, :update
+    get "/bots/:bot_id/tokens", BotsController, :list_tokens
+    post "/bots/:bot_id/tokens", BotsController, :create_token
+    delete "/bots/:bot_id/tokens/:token_id", BotsController, :revoke_token
+
+    get "/admin/bots", AdminBotsController, :index
+    get "/admin/bots/:bot_id", AdminBotsController, :show
+    patch "/admin/bots/:bot_id", AdminBotsController, :update
+    get "/admin/bots/:bot_id/tokens", AdminBotsController, :list_tokens
+    delete "/admin/bots/:bot_id/tokens/:token_id", AdminBotsController, :revoke_token
+
+    get "/channels/:channel_id/commands", ChannelCommandsController, :list
+
+    patch "/channels/:channel_id/commands/:bot_command_id",
+          ChannelCommandsController,
+          :update_binding
+
+    get "/commands/directory", ChannelCommandsController, :directory
+  end
+
+  # Bot-token scope (contract §9.3): `PUT /bot/commands` authenticates with a
+  # bot token (BotAuthPlug), not the browser JWT.
+  scope "/api/chat", LiliumChatWeb do
+    pipe_through :bot_api
+
+    put "/bot/commands", BotCommandsController, :sync
   end
 
   if Mix.env() == :test do

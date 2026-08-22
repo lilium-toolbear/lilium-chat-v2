@@ -218,9 +218,15 @@ defmodule LiliumChat.Projections do
 
   def json_map(_other), do: nil
 
-  @doc "Format a timestamp column (DateTime / ISO string / nil) for wire output."
+  @doc "Format a timestamp column (DateTime / NaiveDateTime / ISO string / nil)."
   def format_ts(nil), do: nil
   def format_ts(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+
+  # Naive `timestamp` columns (this schema stores UTC without a zone) decode as
+  # %NaiveDateTime{}. The wall time IS UTC, so suffix `Z` — matching the
+  # `%DateTime{}` clause and the old Worker's ISO-8601 wire format.
+  def format_ts(%NaiveDateTime{} = ndt), do: NaiveDateTime.to_iso8601(ndt) <> "Z"
+
   def format_ts(value), do: value
 
   @doc """

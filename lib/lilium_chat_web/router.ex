@@ -42,6 +42,8 @@ defmodule LiliumChatWeb.Router do
     # Read path (contract §5 / §6 / §10.3, issue #6): channels, messages,
     # events, context — all pure reads (A12).
     get "/channels", ChannelsController, :index
+    # §5.6 public directory — literal segment must precede "/channels/:channel_id".
+    get "/channels/directory", DirectoryController, :index
     get "/channels/:channel_id", ChannelsController, :show
     get "/channels/:channel_id/messages", MessagesController, :index
     get "/channels/:channel_id/messages/:message_id/context", MessageContextController, :show
@@ -67,6 +69,13 @@ defmodule LiliumChatWeb.Router do
     patch "/admin/bots/:bot_id", AdminBotsController, :update
     get "/admin/bots/:bot_id/tokens", AdminBotsController, :list_tokens
     delete "/admin/bots/:bot_id/tokens/:token_id", AdminBotsController, :revoke_token
+
+    # Read path (contract §5.10 / §7.1 / §7.1b / §8.3, issue #7): members,
+    # invite preview, personal stickers — all pure reads (A12).
+    get "/channels/:channel_id/members", MembersController, :list
+    get "/channels/:channel_id/members/:user_id", MembersController, :show
+    get "/invites/:invite_code", InvitesController, :preview
+    get "/stickers", StickersController, :index
 
     get "/channels/:channel_id/commands", ChannelCommandsController, :list
 

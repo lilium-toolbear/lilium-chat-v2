@@ -17,7 +17,8 @@ defmodule LiliumChatWeb.ReadFixtures do
   A deterministic, monotonically-ordered event_id (UUIDv7-shaped) for `n`.
   Lexicographic order == insertion order, which is how the read path pages.
   """
-  def eid(n), do: "00000000-0000-7000-8000-" <> String.pad_leading(Integer.to_string(n, 16), 12, "0")
+  def eid(n),
+    do: "00000000-0000-7000-8000-" <> String.pad_leading(Integer.to_string(n, 16), 12, "0")
 
   @doc "A base64url per-channel cursor map (`cursors`, contract §10.3)."
   def cursors_param(map) do
@@ -161,6 +162,68 @@ defmodule LiliumChatWeb.ReadFixtures do
       """,
       [user_id, full_name, avatar_url]
     )
+  end
+
+  @doc """
+  Insert an `invites` row (contract §5.8/§5.9/§5.10).
+
+  `opts`: `:created_by` (default `"creator"`), `:channel_id`, `:expires_at`
+  (default now+7d), `:max_uses`, `:used_count`, `:revoked_at`, `:created_at`.
+  Returns the invite_code.
+  """
+  def seed_invite(invite_code, channel_id, opts \\ []) do
+    Repo.query!(
+      """
+      INSERT INTO chat_v2.invites (invite_code, created_by, channel_id, expires_at, max_uses,
+        used_count, revoked_at, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      """,
+      [
+        invite_code,
+        Keyword.get(opts, :created_by, "creator"),
+        channel_id,
+        Keyword.get(opts, :expires_at, DateTime.utc_now() |> DateTime.add(7, :day)),
+        Keyword.get(opts, :max_uses, nil),
+        Keyword.get(opts, :used_count, 0),
+        Keyword.get(opts, :revoked_at, nil),
+        Keyword.get(opts, :created_at, DateTime.utc_now())
+      ],
+      type: true
+    )
+
+    invite_code
+  end
+
+  @doc """
+  Insert a `personal_stickers` row (contract §8.3).
+
+  `opts`: `:url`, `:mime_type`, `:width`, `:height`, `:size_bytes`, `:blurhash`,
+  `:created_at`, `:deleted_at`. Returns the sticker_id.
+  """
+  def seed_personal_sticker(sticker_id, user_id, attachment_id, opts \\ []) do
+    Repo.query!(
+      """
+      INSERT INTO chat_v2.personal_stickers (sticker_id, user_id, attachment_id, url,
+        mime_type, width, height, size_bytes, blurhash, created_at, deleted_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      """,
+      [
+        sticker_id,
+        user_id,
+        attachment_id,
+        Keyword.get(opts, :url, "https://s3.example.com/#{attachment_id}"),
+        Keyword.get(opts, :mime_type, "image/png"),
+        Keyword.get(opts, :width, 512),
+        Keyword.get(opts, :height, 512),
+        Keyword.get(opts, :size_bytes, 12345),
+        Keyword.get(opts, :blurhash, nil),
+        Keyword.get(opts, :created_at, DateTime.utc_now()),
+        Keyword.get(opts, :deleted_at, nil)
+      ],
+      type: true
+    )
+
+    sticker_id
   end
 
   @doc "Insert a read_state cursor row."

@@ -1,26 +1,35 @@
 defmodule LiliumChatWeb.ChannelsController do
   @moduledoc """
-  Channel routes (contract §4).
+  Channel routes (contract §5, issue #6 read path).
 
-  `GET /api/chat/channels` is the tracer-bullet route for the HTTP common
-  layer (issue #2): it exercises JWT auth + error contract + CORS +
-  X-Request-Id end-to-end and returns the deterministic empty-state shape
-  (`{items: [], next_cursor: null}`) that the old Worker produces for a user
-  with no channels. Phase 1 (read path) replaces the body with the real
-  query over `chat_v2.channel_members` + `chat_v2.read_state` +
-  `chat_v2.channels` (spec §4 / D15).
+  * `GET /api/chat/channels` — list the viewer's active channels (§5.1);
+  * `GET /api/chat/channels/{channel_id}` — channel detail + pins (§5.2).
+
+  Both are pure reads (A12). The controller is thin: read the authenticated
+  `user_id`, delegate to `LiliumChat.Channels`, JSON-encode the result.
   """
 
   use LiliumChatWeb, :controller
 
+  alias LiliumChat.Channels
   alias LiliumChatWeb.ErrorHandler
 
   def index(conn, _params) do
-    # Tracer bullet (issue #2): empty-state shape only — no DB access yet.
-    # Hono parity: c.json sends exactly "application/json" (no charset).
+    items = Channels.list_for_user(conn.assigns.identity.user_id)
+
     conn
     |> put_resp_header("content-type", "application/json")
-    |> send_resp(200, Jason.encode!(%{items: [], next_cursor: nil}))
+    |> send_resp(200, Jason.encode!(%{items: items, next_cursor: nil}))
+  rescue
+    e -> ErrorHandler.render_exception(conn, e)
+  end
+
+  def show(conn, %{"channel_id" => channel_id}) do
+    bundle = Channels.detail(conn.assigns.identity.user_id, channel_id)
+
+    conn
+    |> put_resp_header("content-type", "application/json")
+    |> send_resp(200, Jason.encode!(bundle))
   rescue
     e -> ErrorHandler.render_exception(conn, e)
   end

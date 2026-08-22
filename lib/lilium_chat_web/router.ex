@@ -31,7 +31,15 @@ defmodule LiliumChatWeb.Router do
     pipe_through :browser_api
 
     get "/bootstrap", BootstrapController, :show
+
+    # Read path (contract §5 / §6 / §10.3, issue #6): channels, messages,
+    # events, context — all pure reads (A12).
     get "/channels", ChannelsController, :index
+    get "/channels/:channel_id", ChannelsController, :show
+    get "/channels/:channel_id/messages", MessagesController, :index
+    get "/channels/:channel_id/messages/:message_id/context", MessageContextController, :show
+    get "/channels/:channel_id/events", EventsController, :channel_index
+    get "/events", EventsController, :index
 
     # Attachment upload (contract §8.1–§8.2, spec §6.2, issue #14 / C7)
     post "/uploads/images/presign", UploadsController, :presign

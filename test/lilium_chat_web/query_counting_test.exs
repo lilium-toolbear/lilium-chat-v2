@@ -14,9 +14,9 @@ defmodule LiliumChatWeb.QueryCountingTest do
       (`pg_stat_statements`, preloaded in docker-compose for exactly this
       probe) as an independent oracle.
 
-  Note: `GET /api/chat/channels` is still the issue #2 tracer bullet (no DB
-  access), so its bound is `reads == 0`; when issue #6 lands the real query,
-  update the bound here to the agreed maximum for that route.
+  Note: `GET /api/chat/channels` is a real read path (issue #6). Its query
+  count is bounded and independent of the channel count: one `channel_members
+  ⋈ channels` join + one profile batch, so the bound here is a small constant.
   """
 
   use LiliumChatWeb.ConnCase, async: true
@@ -76,8 +76,9 @@ defmodule LiliumChatWeb.QueryCountingTest do
     # Route label is the compiled route pattern (scope prefix included).
     {measurements, metadata} = expect_query_count_event("/api/chat/channels")
     assert measurements.writes == 0
-    # Tracer bullet (issue #2): no DB access yet — bound is exactly zero.
-    assert measurements.reads == 0
+    # Issue #6 read path: bounded reads (1 channel join + 1 profile batch),
+    # independent of the number of channels (A12).
+    assert measurements.reads <= 2
     # Request id correlation for JSON logs (issue #2 handoff).
     [id] = get_resp_header(conn, "x-request-id")
     assert metadata[:request_id] == id

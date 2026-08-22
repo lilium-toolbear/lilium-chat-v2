@@ -27,6 +27,18 @@ config :lilium_chat, LiliumChat.Repo,
 config :lilium_chat, :jwt,
   secret: System.get_env("JWT_SECRET") || "dev-only-jwt-secret-not-for-prod"
 
+# S3 / SeaweedFS (spec §6.2). Dev reads real creds from the environment so
+# `presign`/`finalize` can be exercised end-to-end against a real object store.
+# The default transport is the built-in `:httpc` HEAD (no real E2E in `mix test`).
+config :lilium_chat, :s3,
+  access_key_id: System.get_env("S3_ACCESS_KEY_ID"),
+  secret_access_key: System.get_env("S3_SECRET_ACCESS_KEY"),
+  region: System.get_env("S3_REGION") || "us-east-1",
+  endpoint: System.get_env("S3_ENDPOINT"),
+  bucket: System.get_env("S3_BUCKET"),
+  public_base: System.get_env("S3_PUBLIC_BASE") || System.get_env("S3_ENDPOINT"),
+  presign_ttl_seconds: String.to_integer(System.get_env("PRESIGN_TTL_SECONDS") || "300")
+
 # For development, we disable any cache and enable
 # debugging and code reloading.
 #

@@ -15,6 +15,7 @@ defmodule LiliumChatWeb.Router do
   use LiliumChatWeb, :router
 
   pipeline :browser_api do
+    plug Plug.Parsers, parsers: [:json], pass: ["*/*"], json_decoder: Jason
     plug LiliumChatWeb.AuthPlug
   end
 
@@ -31,6 +32,10 @@ defmodule LiliumChatWeb.Router do
 
     get "/bootstrap", BootstrapController, :show
     get "/channels", ChannelsController, :index
+
+    # Attachment upload (contract §8.1–§8.2, spec §6.2, issue #14 / C7)
+    post "/uploads/images/presign", UploadsController, :presign
+    post "/uploads/images/:attachment_id/finalize", UploadsController, :finalize
   end
 
   if Mix.env() == :test do

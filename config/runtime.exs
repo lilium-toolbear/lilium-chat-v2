@@ -71,6 +71,7 @@ if config_env() == :prod do
     region: System.get_env("S3_REGION") || "us-east-1",
     endpoint: System.get_env("S3_ENDPOINT"),
     bucket: System.get_env("S3_BUCKET"),
+    public_base: System.get_env("S3_PUBLIC_BASE") || System.get_env("S3_ENDPOINT"),
     presign_ttl_seconds: String.to_integer(System.get_env("PRESIGN_TTL_SECONDS") || "300")
 
   # Sentry (spec §10) — same destination as the old Worker.

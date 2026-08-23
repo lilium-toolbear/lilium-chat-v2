@@ -84,7 +84,11 @@ defmodule LiliumChatWeb.Router do
     delete "/channels/:channel_id/members/:user_id", MembersController, :delete
     post "/channels/:channel_id/owner-transfer", MembersController, :transfer_owner
     get "/invites/:invite_code", InvitesController, :preview
+    # Personal sticker library (contract §8.3): list (issue #7) + save/delete
+    # (issue #15, Idempotency-Key required).
     get "/stickers", StickersController, :index
+    post "/stickers", StickersController, :create
+    delete "/stickers/:sticker_id", StickersController, :delete
 
     get "/channels/:channel_id/commands", ChannelCommandsController, :list
 

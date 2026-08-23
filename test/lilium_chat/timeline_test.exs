@@ -130,6 +130,187 @@ defmodule LiliumChat.TimelineTest do
     assert message["command_invocation"] == nil
   end
 
+  # ------------------------------------- attachments/stickers projection (#15)
+
+  test "messages_page projects an image message's attachments" do
+    ch = "gggggggg-0000-7000-8000-gggggggggggg"
+    seed_channel(ch, created_by: @viewer)
+    seed_membership(ch, @viewer, "member")
+
+    att = seed_attachment("att-tl-1", owner_user_id: @other)
+
+    m =
+      seed_message("gggggggg-0001-7000-8000-000000000001", ch, @other, nil,
+        type: "image",
+        event_id: eid(1),
+        created_at: t(1)
+      )
+
+    seed_message_attachment(m, att)
+
+    page = Timeline.messages_page(@viewer, ch, %{})
+    [frame] = page.items
+    assert frame["type"] == "message.created"
+
+    message = frame["payload"]["message"]
+    assert message["type"] == "image"
+    assert message["sticker"] == nil
+
+    assert message["attachments"] == [
+             %{
+               "attachment_id" => att,
+               "url" => "https://s3.example.com/#{att}",
+               "mime_type" => "image/png",
+               "size_bytes" => 1024,
+               "width" => 100,
+               "height" => 100,
+               "blurhash" => nil
+             }
+           ]
+  end
+
+  test "messages_page projects a sticker message's sticker snapshot" do
+    ch = "hhhhhhhh-0000-7000-8000-hhhhhhhhhhhh"
+    seed_channel(ch, created_by: @viewer)
+    seed_membership(ch, @viewer, "member")
+
+    m =
+      seed_message("hhhhhhhh-0001-7000-8000-000000000001", ch, @other, nil,
+        type: "sticker",
+        event_id: eid(1),
+        created_at: t(1)
+      )
+
+    seed_sticker(
+      m,
+      sticker_id: "st-tl-1",
+      attachment_id: "att-tl-2",
+      url: "https://s3.example.com/att-tl-2",
+      size_bytes: 777
+    )
+
+    page = Timeline.messages_page(@viewer, ch, %{})
+    [frame] = page.items
+    message = frame["payload"]["message"]
+
+    # contract §3.4: the sticker projection carries the sender-side sticker_id
+    # AND the canonical attachment_id; attachments=[] to avoid a double render.
+    assert message["type"] == "sticker"
+
+    assert message["sticker"] == %{
+             "sticker_id" => "st-tl-1",
+             "attachment_id" => "att-tl-2",
+             "url" => "https://s3.example.com/att-tl-2",
+             "mime_type" => "image/png",
+             "width" => 64,
+             "height" => 64,
+             "size_bytes" => 777,
+             "blurhash" => nil
+           }
+
+    assert message["attachments"] == []
+    assert message["mentions"] == []
+  end
+
+  test "safe projection: a recalled sticker message clears the sticker field (A9, no content leak)" do
+    ch = "iiiiiiii-0000-7000-8000-iiiiiiiiiiii"
+    seed_channel(ch, created_by: @viewer)
+    seed_membership(ch, @viewer, "member")
+
+    m =
+      seed_message("iiiiiiii-0001-7000-8000-000000000001", ch, @viewer, nil,
+        type: "sticker",
+        event_id: eid(1),
+        created_at: t(1)
+      )
+
+    seed_sticker(m, sticker_id: "st-tl-3", attachment_id: "att-tl-3")
+
+    set_message_status(m, "recalled")
+
+    seed_event(
+      eid(2),
+      ch,
+      "message.recalled",
+      %{"message" => %{"message_id" => m}},
+      actor_kind: "user",
+      actor_id: @viewer,
+      occurred_at: t(2)
+    )
+
+    page = Timeline.channel_events(@viewer, ch, "", 100)
+    # the message.created (eid 1) is suppressed — only the recall event remains
+    [recalled] = page.events
+    assert recalled["type"] == "message.recalled"
+
+    message = recalled["payload"]["message"]
+    assert message["type"] == "sticker"
+    assert message["status"] == "recalled"
+    assert message["text"] == nil
+    assert message["sticker"] == nil
+    assert message["attachments"] == []
+    assert message["mentions"] == []
+  end
+
+  test "safe projection: a deleted image message clears its attachments (A9)" do
+    ch = "jjjjjjjj-0000-7000-8000-jjjjjjjjjjjj"
+    seed_channel(ch, created_by: @viewer)
+    seed_membership(ch, @viewer, "member")
+
+    att = seed_attachment("att-tl-4", owner_user_id: @viewer)
+
+    m =
+      seed_message("jjjjjjjj-0001-7000-8000-000000000001", ch, @viewer, nil,
+        type: "image",
+        event_id: eid(1),
+        created_at: t(1)
+      )
+
+    seed_message_attachment(m, att)
+
+    set_message_status(m, "deleted")
+
+    seed_event(
+      eid(2),
+      ch,
+      "message.deleted",
+      %{"message" => %{"message_id" => m}},
+      actor_kind: "user",
+      actor_id: @viewer,
+      occurred_at: t(2)
+    )
+
+    page = Timeline.channel_events(@viewer, ch, "", 100)
+    [deleted] = page.events
+    assert deleted["type"] == "message.deleted"
+
+    message = deleted["payload"]["message"]
+    assert message["type"] == "image"
+    assert message["status"] == "deleted"
+    assert message["attachments"] == []
+    assert message["sticker"] == nil
+  end
+
+  test "messages_page suppresses a deleted sticker message's created event entirely" do
+    ch = "kkkkkkkk-0000-7000-8000-kkkkkkkkkkkk"
+    seed_channel(ch, created_by: @viewer)
+    seed_membership(ch, @viewer, "member")
+
+    m =
+      seed_message("kkkkkkkk-0001-7000-8000-000000000001", ch, @viewer, nil,
+        type: "sticker",
+        event_id: eid(1),
+        status: "deleted",
+        created_at: t(1)
+      )
+
+    seed_sticker(m, sticker_id: "st-tl-4", attachment_id: "att-tl-5")
+
+    # history returns no items at all — no sticker content leaks via history
+    page = Timeline.messages_page(@viewer, ch, %{})
+    assert page.items == []
+  end
+
   test "messages_page pages with limit + next_cursor" do
     ch = "dddddddd-0000-7000-8000-dddddddddddd"
     seed_channel(ch, created_by: @viewer)

@@ -275,6 +275,163 @@ defmodule LiliumChat.MessageSendTest do
              })
   end
 
+  # ---------------------------------------------- attachments/stickers (#15)
+
+  test "image message: attachment_ids resolve to the ack projection + message_attachments rows" do
+    cid = channel!()
+    att1 = seed_attachment("att-img-1", owner_user_id: @uid)
+    att2 = seed_attachment("att-img-2", owner_user_id: @uid)
+
+    {:ok, ack} =
+      send!(cid, "cmd-img-001", %{
+        "type" => "image",
+        "text" => "",
+        "attachment_ids" => [att1, att2]
+      })
+
+    msg = ack["payload"]["message"]
+    assert msg["type"] == "image"
+    assert msg["status"] == "normal"
+    assert msg["sticker"] == nil
+    # contract §3.4: image attachments project as MessageImageAttachment, in payload order
+    assert msg["attachments"] == [
+             %{
+               "attachment_id" => att1,
+               "url" => "https://s3.example.com/#{att1}",
+               "mime_type" => "image/png",
+               "size_bytes" => 1024,
+               "width" => 100,
+               "height" => 100,
+               "blurhash" => nil
+             },
+             %{
+               "attachment_id" => att2,
+               "url" => "https://s3.example.com/#{att2}",
+               "mime_type" => "image/png",
+               "size_bytes" => 1024,
+               "width" => 100,
+               "height" => 100,
+               "blurhash" => nil
+             }
+           ]
+
+    # the message ↔ attachment links are persisted
+    links =
+      Repo.query!(
+        "SELECT attachment_id FROM chat_v2.message_attachments WHERE message_id = $1",
+        [msg["message_id"]]
+      )
+      |> Map.get(:rows)
+      |> Enum.map(&hd/1)
+      |> Enum.sort()
+
+    assert links == Enum.sort([att1, att2])
+  end
+
+  test "image message: unknown attachment → UNSUPPORTED_ATTACHMENT_TYPE" do
+    cid = channel!()
+
+    assert {:error, %LiliumChat.Errors.ApiError{code: "UNSUPPORTED_ATTACHMENT_TYPE"}} =
+             send!(cid, "cmd-img-002", %{
+               "type" => "image",
+               "text" => "",
+               "attachment_ids" => ["att-does-not-exist"]
+             })
+  end
+
+  test "image message: attachment owned by another user → UNSUPPORTED_ATTACHMENT_TYPE" do
+    cid = channel!()
+    att = seed_attachment("att-img-3", owner_user_id: @other)
+
+    assert {:error, %LiliumChat.Errors.ApiError{code: "UNSUPPORTED_ATTACHMENT_TYPE"}} =
+             send!(cid, "cmd-img-003", %{
+               "type" => "image",
+               "text" => "",
+               "attachment_ids" => [att]
+             })
+  end
+
+  test "sticker message: sticker_id resolves to the full sticker projection + message_stickers row" do
+    cid = channel!()
+    seed_personal_sticker("st-send-1", @uid, "att-send-1")
+
+    {:ok, ack} =
+      send!(cid, "cmd-stk-001", %{
+        "type" => "sticker",
+        "text" => "",
+        "sticker_id" => "st-send-1"
+      })
+
+    msg = ack["payload"]["message"]
+    assert msg["type"] == "sticker"
+    assert msg["format"] == "plain"
+    assert msg["status"] == "normal"
+    assert msg["stream_state"] == "none"
+    # contract §3.4 sticker projection: sender-side sticker_id + canonical
+    # attachment_id + the stable image projection; attachments=[] to avoid a
+    # double render.
+    assert msg["sticker"] == %{
+             "sticker_id" => "st-send-1",
+             "attachment_id" => "att-send-1",
+             "url" => "https://s3.example.com/att-send-1",
+             "mime_type" => "image/png",
+             "width" => 512,
+             "height" => 512,
+             "size_bytes" => 12345,
+             "blurhash" => nil
+           }
+
+    assert msg["attachments"] == []
+    assert msg["mentions"] == []
+    assert msg["components"] == []
+
+    # the sticker snapshot is persisted (message_stickers, issue #15)
+    row =
+      Repo.query!(
+        "SELECT sticker_id, attachment_id FROM chat_v2.message_stickers WHERE message_id = $1",
+        [msg["message_id"]]
+      )
+
+    assert row.num_rows == 1
+    assert hd(row.rows) == ["st-send-1", "att-send-1"]
+  end
+
+  test "sticker message: idempotent replay (same command_id + body) reuses the committed message" do
+    cid = channel!()
+    seed_personal_sticker("st-send-2", @uid, "att-send-2")
+    body = %{"type" => "sticker", "text" => "", "sticker_id" => "st-send-2"}
+
+    {:ok, ack1} = send!(cid, "cmd-stk-002", body)
+    {:ok, ack2} = send!(cid, "cmd-stk-002", body)
+
+    assert ack1["payload"]["message"]["message_id"] == ack2["payload"]["message"]["message_id"]
+    assert message_count(cid) == 1
+  end
+
+  test "sticker message: sticker deleted from the library before send → STICKER_NOT_FOUND" do
+    cid = channel!()
+    seed_personal_sticker("st-send-3", @uid, "att-send-3", deleted_at: DateTime.utc_now())
+
+    assert {:error, %LiliumChat.Errors.ApiError{code: "STICKER_NOT_FOUND"}} =
+             send!(cid, "cmd-stk-003", %{
+               "type" => "sticker",
+               "text" => "",
+               "sticker_id" => "st-send-3"
+             })
+  end
+
+  test "sticker message: sticker owned by another user → STICKER_NOT_FOUND" do
+    cid = channel!()
+    seed_personal_sticker("st-send-4", @other, "att-send-4")
+
+    assert {:error, %LiliumChat.Errors.ApiError{code: "STICKER_NOT_FOUND"}} =
+             send!(cid, "cmd-stk-004", %{
+               "type" => "sticker",
+               "text" => "",
+               "sticker_id" => "st-send-4"
+             })
+  end
+
   # ------------------------------------------------- channel gates
 
   test "non-member → CHANNEL_NOT_FOUND (old Worker WS path, not FORBIDDEN)" do

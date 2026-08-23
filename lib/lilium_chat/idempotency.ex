@@ -64,6 +64,44 @@ defmodule LiliumChat.Idempotency do
   end
 
   @doc """
+  Run an idempotent command in ONE PG transaction: `check/5` → the caller's
+  mutation (`fun` returns the ack payload) → `write_completed/6`.
+
+  Cached replays return the stored response without calling `fun`; a key
+  conflict raises before `fun` runs. An exception out of `fun` propagates
+  (rolling the transaction back, so a failed command may be retried with
+  the same key — the idempotency row is written only on success).
+  """
+  def run_operation(principal_kind, principal_id, operation, operation_id, request_hash, fun) do
+    {:ok, response} =
+      Repo.transaction(fn ->
+        case check(principal_kind, principal_id, operation, operation_id, request_hash) do
+          {:cached, response} ->
+            response
+
+          {:conflict, api_error} ->
+            raise api_error
+
+          :missing ->
+            response = fun.()
+
+            write_completed(
+              principal_kind,
+              principal_id,
+              operation,
+              operation_id,
+              request_hash,
+              response
+            )
+
+            response
+        end
+      end)
+
+    response
+  end
+
+  @doc """
   Store the committed ack payload for an operation id. Must run in the same
   transaction as the business mutation (contract §2.5).
   """

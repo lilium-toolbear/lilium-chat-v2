@@ -42,9 +42,13 @@ defmodule LiliumChatWeb.Router do
     # Read path (contract §5 / §6 / §10.3, issue #6): channels, messages,
     # events, context — all pure reads (A12).
     get "/channels", ChannelsController, :index
+    # Channel lifecycle (contract §5.2b / §5.3 / §5.4, issue #11).
+    post "/channels", ChannelsController, :create
     # §5.6 public directory — literal segment must precede "/channels/:channel_id".
     get "/channels/directory", DirectoryController, :index
     get "/channels/:channel_id", ChannelsController, :show
+    patch "/channels/:channel_id", ChannelsController, :update
+    post "/channels/:channel_id/dissolve", ChannelsController, :dissolve
     get "/channels/:channel_id/messages", MessagesController, :index
     get "/channels/:channel_id/messages/:message_id/context", MessageContextController, :show
     get "/channels/:channel_id/events", EventsController, :channel_index

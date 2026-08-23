@@ -619,6 +619,9 @@ defmodule LiliumChat.Timeline do
         |> Enum.reject(&is_nil/1)
       end)
       |> List.flatten()
+      # `actor_kind == "user" && actor_id` yields `false` for system actors —
+      # keep only real user ids before the profile batch.
+      |> Enum.filter(&is_binary/1)
 
     (sender_ids ++ actor_ids) |> Enum.uniq()
   end

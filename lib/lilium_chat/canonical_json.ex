@@ -31,6 +31,12 @@ defmodule LiliumChat.CanonicalJSON do
     Base.encode16(digest, case: :lower)
   end
 
+  # An empty Elixir map is the only map form — the empty JSON object.
+  # Non-empty objects are field lists (see the module convention), so this
+  # clause exists for the old Worker's literal `"{}"` request hashes
+  # (channel.dissolve, empty channel.update body).
+  defp do_encode(%{}), do: "{}"
+
   defp do_encode(fields) when is_list(fields) do
     if object?(fields) do
       fields

@@ -17,7 +17,18 @@ defmodule LiliumChat.Channel do
 
   use GenServer
 
-  alias LiliumChat.{ChannelPins, Errors, Ids, MessageMutate, MessageSend, Query, Repo}
+  alias LiliumChat.{
+    ChannelLifecycle,
+    ChannelPins,
+    Errors,
+    Ids,
+    MessageMutate,
+    MessageSend,
+    Query,
+    Repo
+  }
+
+  alias LiliumChat.WebSockets.Frames
 
   require Logger
 
@@ -105,6 +116,53 @@ defmodule LiliumChat.Channel do
     GenServer.call(pid, {:unpin_message, input}, 30_000)
   end
 
+  # ----------------------------------------------------- channel lifecycle
+
+  @doc """
+  Create a channel (`POST /api/chat/channels`, contract §5.2b, issue #11).
+  `key` is the `Idempotency-Key`; `body` the JSON request body. The channel
+  id is minted here (UUIDv7) and the create runs on the NEW channel's
+  writer, whose `seq` seeds at 0 (no events exist yet).
+
+  Returns `{:ok, response}` (the 201 response body — a fresh commit or an
+  idempotent replay) or `{:error, %LiliumChat.Errors.ApiError{}}`.
+  """
+  def create(user_id, key, body) do
+    channel_id = Ids.uuidv7()
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(
+      pid,
+      {:create_channel, %{user_id: user_id, command_id: key, payload: body || %{}}},
+      30_000
+    )
+  end
+
+  @doc """
+  Update a channel (`PATCH /api/chat/channels/{channel_id}`, contract §5.3,
+  issue #11). Returns `{:ok, response}` or `{:error, %LiliumChat.Errors.ApiError{}}`.
+  """
+  def update(user_id, key, channel_id, body) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(
+      pid,
+      {:update_channel, %{user_id: user_id, command_id: key, payload: body || %{}}},
+      30_000
+    )
+  end
+
+  @doc """
+  Dissolve a channel (`POST /api/chat/channels/{channel_id}/dissolve`,
+  contract §5.4, issue #11). Returns `{:ok, response}` or
+  `{:error, %LiliumChat.Errors.ApiError{}}`.
+  """
+  def dissolve(user_id, key, channel_id) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:dissolve_channel, %{user_id: user_id, command_id: key}}, 30_000)
+  end
+
   # --------------------------------------------------------- server callbacks
 
   @impl true
@@ -134,10 +192,24 @@ defmodule LiliumChat.Channel do
     do:
       run_command(state, fn -> ChannelPins.unpin_message(state.channel_id, state.seq, input) end)
 
+  @impl true
+  def handle_call({:create_channel, input}, _from, state),
+    do: run_command(state, fn -> ChannelLifecycle.create(state.channel_id, state.seq, input) end)
+
+  @impl true
+  def handle_call({:update_channel, input}, _from, state),
+    do: run_command(state, fn -> ChannelLifecycle.update(state.channel_id, state.seq, input) end)
+
+  @impl true
+  def handle_call({:dissolve_channel, input}, _from, state),
+    do:
+      run_command(state, fn -> ChannelLifecycle.dissolve(state.channel_id, state.seq, input) end)
+
   # Shared dispatch for every write command: run the domain op, rescue the
   # pre-txn business errors (all raises happen before the event_id is
   # allocated, so the held seq is unchanged), broadcast the committed event
-  # frames (in event_id order) and reply with the ack.
+  # frames (in event_id order) + the user-scoped `my_channels_changed` hints,
+  # and reply with the ack / response.
   defp run_command(state, fun) do
     {result, new_seq} =
       try do
@@ -148,23 +220,30 @@ defmodule LiliumChat.Channel do
       end
 
     broadcast_frames(state.channel_id, result)
+    broadcast_user_hints(state.channel_id, result)
 
     {:reply, to_reply(result), %{state | seq: new_seq}}
   end
 
   # --------------------------------------------------------------- internals
 
+  # WS paths reply with the `command_ack` frame; the HTTP lifecycle paths
+  # (issue #11) reply with the HTTP response body.
   defp to_reply(%{kind: :created, ack_frame: ack}), do: {:ok, ack}
   defp to_reply(%{kind: :cached, ack_frame: ack}), do: {:ok, ack}
+  defp to_reply(%{kind: :created, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :updated, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :dissolved, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :cached, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :error, error: api_error}), do: {:error, api_error}
 
-  # `message.send` (issue #9) returns a single `event_frame`; the #10 write
-  # paths return `event_frames` (a list, in event_id order).
-  defp broadcast_frames(channel_id, %{kind: :created, event_frame: frame}),
-    do: Enum.each([frame], fn frame -> broadcast(channel_id, frame) end)
+  # `message.send` (issue #9) returns a single `event_frame`; the #10/#11
+  # write paths return `event_frames` (a list, in event_id order).
+  defp broadcast_frames(channel_id, %{event_frame: frame}), do: broadcast(channel_id, frame)
 
-  defp broadcast_frames(channel_id, %{kind: :created, event_frames: frames}),
-    do: Enum.each(frames, fn frame -> broadcast(channel_id, frame) end)
+  defp broadcast_frames(channel_id, %{event_frames: frames})
+       when is_list(frames) and frames != [],
+       do: Enum.each(frames, fn frame -> broadcast(channel_id, frame) end)
 
   defp broadcast_frames(_channel_id, _result), do: :ok
 
@@ -172,6 +251,21 @@ defmodule LiliumChat.Channel do
     topic = "channel:" <> channel_id
     Phoenix.PubSub.broadcast(LiliumChat.PubSub, topic, {:broadcast, topic, frame})
   end
+
+  # `my_channels_changed` (contract §10.5): after the lifecycle txn commits,
+  # each affected user's `user:<uid>` topic gets the user-scoped hint; the
+  # browser socket pushes it to the user's live sessions. Trigger set (D8):
+  # join / leave / dissolve — NOT role change, NOT channel.update.
+  defp broadcast_user_hints(channel_id, %{user_hints: hints})
+       when is_list(hints) and hints != [] do
+    Enum.each(hints, fn {user_id, reason} ->
+      topic = "user:" <> user_id
+      frame = Frames.user_event("my_channels_changed", reason, channel_id)
+      Phoenix.PubSub.broadcast(LiliumChat.PubSub, topic, {:broadcast, topic, frame})
+    end)
+  end
+
+  defp broadcast_user_hints(_channel_id, _result), do: :ok
 
   defp recover_seq(channel_id) do
     case Query.rows(

@@ -21,6 +21,17 @@ defmodule LiliumChat.CanonicalJSONTest do
       assert CanonicalJSON.encode(42) == "42"
     end
 
+    test "the empty object is distinct from the empty array" do
+      # issue #11: the old Worker's literal `"{}"` request hashes (dissolve,
+      # empty update body) must be reproducible byte-for-byte.
+      assert CanonicalJSON.encode(%{}) == "{}"
+      assert CanonicalJSON.encode([]) == "[]"
+      assert CanonicalJSON.encode_and_sha256(%{}) != CanonicalJSON.encode_and_sha256([])
+
+      assert CanonicalJSON.encode_and_sha256(%{}) ==
+               :crypto.hash(:sha256, "{}") |> Base.encode16(case: :lower)
+    end
+
     test "nested objects and arrays" do
       # an object whose value is another object
       assert CanonicalJSON.encode([{"outer", [{"inner", ["a", 1]}]}]) ==

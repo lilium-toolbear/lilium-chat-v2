@@ -19,11 +19,7 @@ defmodule LiliumChat.Channels do
     `FORBIDDEN` (403) when a private channel is viewed by a non-member.
   """
 
-  alias LiliumChat.Errors
-  alias LiliumChat.Profiles
-  alias LiliumChat.Projections
-  alias LiliumChat.Query
-  alias LiliumChat.Repo
+  alias LiliumChat.{ChannelPins, Errors, Profiles, Projections, Query, Repo}
 
   # ------------------------------------------------------------------ public
 
@@ -90,7 +86,7 @@ defmodule LiliumChat.Channels do
       if meta["kind"] == "dm" or role == nil do
         []
       else
-        query_channel_pins(channel_id)
+        ChannelPins.list_rows(channel_id)
       end
 
     pin_owner_ids = pins_raw |> Enum.map(& &1["pinned_by_user_id"]) |> Enum.reject(&is_nil/1)
@@ -122,7 +118,7 @@ defmodule LiliumChat.Channels do
 
     %{
       channel: summary,
-      channel_pins: Enum.map(pins_raw, &project_pin(&1, profiles))
+      channel_pins: Enum.map(pins_raw, &ChannelPins.project_wire(&1, profiles))
     }
   end
 
@@ -322,49 +318,6 @@ defmodule LiliumChat.Channels do
       nil -> {nil, nil, nil}
       row -> {row["created_at"], row["text"], row["sender_user_id"]}
     end
-  end
-
-  defp query_channel_pins(channel_id) do
-    Repo.query(
-      """
-      SELECT pin_id, channel_id, pin_kind, pin_owner_kind, pin_owner_id, priority,
-             session_id, source_message_id, pinned_by_user_id, pinned_at, expires_at,
-             last_pin_event_id, message_projection_json
-      FROM chat_v2.channel_pins
-      WHERE channel_id = $1
-      ORDER BY priority ASC, pin_id ASC
-      """,
-      [channel_id],
-      type: true
-    )
-    |> Query.rows()
-  end
-
-  # Wire shape per contract §3.10.3 (ChannelPin). `pinned_by` is a UserSummary
-  # (pinned_message pins); `message` is the PinMessageProjection. No
-  # created_at / updated_at on the wire.
-  defp project_pin(row, profiles) do
-    pinned_by =
-      case row["pinned_by_user_id"] do
-        nil -> nil
-        id -> Projections.user_summary(id, profiles)
-      end
-
-    %{
-      "pin_id" => row["pin_id"],
-      "channel_id" => row["channel_id"],
-      "pin_kind" => row["pin_kind"],
-      "pin_owner_kind" => row["pin_owner_kind"],
-      "pin_owner_id" => row["pin_owner_id"],
-      "priority" => row["priority"],
-      "session_id" => row["session_id"],
-      "source_message_id" => row["source_message_id"],
-      "pinned_by" => pinned_by,
-      "pinned_at" => Projections.format_ts(row["pinned_at"]),
-      "expires_at" => Projections.format_ts(row["expires_at"]),
-      "last_pin_event_id" => row["last_pin_event_id"],
-      "message" => Projections.json_map(row["message_projection_json"])
-    }
   end
 
   # ---------------------------------------------------------------- helpers

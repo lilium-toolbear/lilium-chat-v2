@@ -37,23 +37,38 @@ defmodule LiliumChat.Ids do
   `0xFFF`). When `now_ms` advances past `last_ms` the counter resets to `0`;
   otherwise the counter increments (and the timestamp is held at `last_ms`) so
   the result stays strictly increasing within the channel even on a
-  backward-clock tick. Returns `{id, new_seq}` — the caller owns `seq`.
+  backward-clock tick. If the 12-bit counter is exhausted within one ms, the
+  allocation rolls into the NEXT ms slot (counter 0) instead of wrapping to
+  0 — strictly increasing in every case (the old Worker's 12-bit wrap is the
+  same id space, "should not happen in practice"). Returns `{id, new_seq}` —
+  the caller owns `seq`.
   """
   def monotonic_uuidv7(seq, now_ms \\ System.system_time(:millisecond)) do
     {ms, counter} =
-      if now_ms > seq.last_ms do
-        {now_ms, 0}
-      else
-        {seq.last_ms, Bitwise.band(seq.counter + 1, 0xFFF)}
+      cond do
+        now_ms > seq.last_ms ->
+          {now_ms, 0}
+
+        seq.counter < 0xFFF ->
+          {seq.last_ms, seq.counter + 1}
+
+        # counter exhausted for this ms: roll into the next ms slot
+        true ->
+          {seq.last_ms + 1, 0}
       end
 
     ms_hex = ms |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(12, "0")
 
+    # Encode as a FIXED 3-digit field (high nibble + 2-digit low byte). The
+    # low byte must be zero-padded to 2 digits: a counter like 0x900 would
+    # otherwise encode as "90" → padded to "090" → parse back as 0x090,
+    # breaking lexicographic order and crash recovery.
     counter_hex =
       (Integer.to_string(Bitwise.band(Bitwise.bsr(counter, 8), 0x0F), 16) <>
-         Integer.to_string(Bitwise.band(counter, 0xFF), 16))
+         (Integer.to_string(Bitwise.band(counter, 0xFF), 16)
+          |> String.downcase()
+          |> String.pad_leading(2, "0")))
       |> String.downcase()
-      |> String.pad_leading(3, "0")
 
     <<b0, rest::binary>> = :crypto.strong_rand_bytes(8)
     b0 = Bitwise.band(b0, 0x3F) ||| 0x80

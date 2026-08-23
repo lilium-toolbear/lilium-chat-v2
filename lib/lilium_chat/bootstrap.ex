@@ -20,7 +20,7 @@ defmodule LiliumChat.Bootstrap do
   Reads are strictly read-only (no hidden writes).
   """
 
-  alias LiliumChat.{ChannelCommands, Repo}
+  alias LiliumChat.{ChannelCommands, ChannelPins, Repo}
 
   @profile_batch_size 50
   @bootstrap_message_limit 50
@@ -41,6 +41,26 @@ defmodule LiliumChat.Bootstrap do
   Returns the response map (already a plain map, ready for Jason encoding).
   """
   def fetch(user_id, requested_channel_id) do
+    # The §4.1 snapshot invariant: `channel_pins` must equal the fold of the
+    # `channel.pin.*` events ≤ `event_state.per_channel[channel_id]`. That is a
+    # SNAPSHOT property — the old Worker read channels + pins + events in one
+    # atomic DO transaction. PG's default READ COMMITTED is per-statement, so
+    # separate queries could straddle a concurrent pin commit (a pin landing
+    # between the channel/events read and the pin read would make
+    # pins ⊋ fold(events ≤ cursor)). Run the whole aggregate inside ONE
+    # REPEATABLE READ transaction so every table is observed at a single
+    # consistent snapshot (read-only MVCC snapshot, no locks held).
+    Repo.transaction(
+      fn -> do_fetch(user_id, requested_channel_id) end,
+      isolation: :repeatable_read
+    )
+    |> case do
+      {:ok, response} -> response
+      {:error, reason} -> raise "bootstrap aggregate read failed: #{inspect(reason)}"
+    end
+  end
+
+  defp do_fetch(user_id, requested_channel_id) do
     # 1. Main channel list (one query)
     channel_rows = query_my_channels(user_id)
 
@@ -66,8 +86,12 @@ defmodule LiliumChat.Bootstrap do
           query_messages(row["channel_id"])
       end
 
-    # 4. Channel pins for active channel (one query; DM → [])
-    channel_pins =
+    # 4. Channel pins for active channel (one query; DM → []). Rows are
+    #    projected to the `ChannelPin` wire shape after the profile batch
+    #    (step 6) — the §4.1 snapshot invariant (pins == fold of the
+    #    `channel.pin.*` events ≤ event_state) holds because both reads run
+    #    inside the same REPEATABLE READ transaction (see fetch/2, issue #10 AC4).
+    channel_pin_rows =
       case active_channel do
         nil ->
           []
@@ -76,7 +100,7 @@ defmodule LiliumChat.Bootstrap do
           if row["kind"] == "dm" do
             []
           else
-            query_channel_pins(row["channel_id"])
+            ChannelPins.list_rows(row["channel_id"])
           end
       end
 
@@ -96,10 +120,14 @@ defmodule LiliumChat.Bootstrap do
         nil
       end
 
-    # 6. Profile batch: current user + last-message senders + DM peers
-    #    (all in one batch-50 lookup, D16)
-    profile_ids = collect_profile_ids(user_id, channel_rows)
+    # 6. Profile batch: current user + last-message senders + DM peers +
+    #    pin owners (all in one batch-50 lookup, D16)
+    profile_ids = collect_profile_ids(user_id, channel_rows, channel_pin_rows)
     profiles = resolve_profiles(profile_ids)
+
+    # Project the pin rows to the wire shape (shared with GET /channels/{id}).
+    channel_pins =
+      Enum.map(channel_pin_rows, fn row -> ChannelPins.project_wire(row, profiles) end)
 
     # 7. Assemble channel summaries
     channels = build_channel_summaries(channel_rows, profiles)
@@ -248,39 +276,6 @@ defmodule LiliumChat.Bootstrap do
     end
   end
 
-  @doc """
-  Query active channel pins for a channel (one SQL query).
-  Returns a list of pin maps.
-  """
-  def query_channel_pins(channel_id) do
-    query = """
-    SELECT
-      p.pin_id,
-      p.channel_id,
-      p.pin_kind,
-      p.pin_owner_kind,
-      p.pin_owner_id,
-      p.priority,
-      p.session_id,
-      p.source_message_id,
-      p.pinned_by_user_id,
-      p.pinned_at,
-      p.expires_at,
-      p.last_pin_event_id,
-      p.message_projection_json,
-      p.created_at,
-      p.updated_at
-    FROM chat_v2.channel_pins p
-    WHERE p.channel_id = $1
-    ORDER BY p.priority DESC, p.pinned_at DESC NULLS LAST
-    """
-
-    case Repo.query(query, [channel_id], type: true) do
-      {:ok, result} -> rows_to_maps(result)
-      {:error, _} -> []
-    end
-  end
-
   # ------------------------------------------------------- profile batch
 
   @doc """
@@ -425,14 +420,19 @@ defmodule LiliumChat.Bootstrap do
     end
   end
 
-  defp collect_profile_ids(user_id, channel_rows) do
+  defp collect_profile_ids(user_id, channel_rows, pin_rows) do
     sender_ids =
       for row <- channel_rows,
           not is_nil(row["last_message_sender_id"]) do
         row["last_message_sender_id"]
       end
 
-    [user_id | sender_ids]
+    pin_owner_ids =
+      for row <- pin_rows, not is_nil(row["pinned_by_user_id"]) do
+        row["pinned_by_user_id"]
+      end
+
+    [user_id | sender_ids] ++ pin_owner_ids
   end
 
   defp fallback_display_name(user_id) do

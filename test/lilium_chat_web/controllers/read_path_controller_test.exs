@@ -49,7 +49,8 @@ defmodule LiliumChatWeb.ReadPathControllerTest do
 
     message_id =
       seed_message("aaaaaaaa-0001-7000-8000-000000000001", ch, @other, "first message",
-        event_id: eid(1), created_at: DateTime.utc_now() |> DateTime.add(1, :second)
+        event_id: eid(1),
+        created_at: DateTime.utc_now() |> DateTime.add(1, :second)
       )
 
     {ch, message_id}
@@ -138,7 +139,9 @@ defmodule LiliumChatWeb.ReadPathControllerTest do
 
   test "GET /channels/{id}/messages returns EventFrame items + next_cursor" do
     {ch, _} = seed_basic_channel()
-    conn = request(:get, "/api/chat/channels/#{ch}/messages", [{"origin", @origin} | auth_headers()])
+
+    conn =
+      request(:get, "/api/chat/channels/#{ch}/messages", [{"origin", @origin} | auth_headers()])
 
     assert conn.status == 200
     json = body_json(conn)
@@ -156,6 +159,7 @@ defmodule LiliumChatWeb.ReadPathControllerTest do
 
   test "GET .../messages/{id}/context returns anchor + window" do
     {ch, mid} = seed_basic_channel()
+
     conn =
       request(
         :get,
@@ -173,6 +177,7 @@ defmodule LiliumChatWeb.ReadPathControllerTest do
   test "GET .../messages/{id}/context → 404 MESSAGE_NOT_FOUND for a missing message" do
     {ch, _} = seed_basic_channel()
     missing = "eeeeeeee-9999-7999-8999-999999999999"
+
     conn =
       request(
         :get,
@@ -188,6 +193,7 @@ defmodule LiliumChatWeb.ReadPathControllerTest do
 
   test "GET /channels/{id}/events returns events + latest_event_id + next_cursor" do
     {ch, _} = seed_basic_channel()
+
     conn =
       request(
         :get,
@@ -206,6 +212,7 @@ defmodule LiliumChatWeb.ReadPathControllerTest do
 
   test "GET /events with ?channel_id=&after_event_id= returns the merged envelope" do
     {ch, _} = seed_basic_channel()
+
     conn =
       request(
         :get,
@@ -224,6 +231,7 @@ defmodule LiliumChatWeb.ReadPathControllerTest do
   test "GET /events with ?cursors= decodes the per-channel cursor map" do
     {ch, _} = seed_basic_channel()
     cursors = cursors_param(%{ch => ""})
+
     conn =
       request(
         :get,

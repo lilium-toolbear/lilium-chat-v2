@@ -76,6 +76,7 @@ if config_env() == :prod do
 
   # Sentry (spec §10) — same destination as the old Worker.
   sentry_dsn = System.get_env("SENTRY_DSN")
+
   if sentry_dsn do
     config :sentry, dsn: sentry_dsn, environment: :prod
   end

@@ -18,6 +18,18 @@ defmodule LiliumChat.Projections do
 
   @api_version "lilium.chat.v1"
 
+  # `message.*` lifecycle events (and the content-bearing `interaction.completed`)
+  # carry `{ channel_id, event_id, message }` in the PAYLOAD as well as the
+  # envelope (contract §6.2 / §10.4). Stored payloads stay `{ message }` — the
+  # ids are injected on projection (live + replay share this builder).
+  @message_payload_types ~w(
+    message.created
+    message.updated
+    message.recalled
+    message.deleted
+    interaction.completed
+  )
+
   @doc """
   Build a Browser-visible EventEnvelope frame (contract §10.4).
   """
@@ -29,8 +41,18 @@ defmodule LiliumChat.Projections do
       "type" => type,
       "channel_id" => channel_id,
       "occurred_at" => format_ts(occurred_at),
-      "payload" => payload
+      "payload" => message_payload(type, channel_id, event_id, payload)
     }
+  end
+
+  defp message_payload(type, channel_id, event_id, payload) do
+    if type in @message_payload_types do
+      payload
+      |> Map.put("channel_id", channel_id)
+      |> Map.put("event_id", event_id)
+    else
+      payload
+    end
   end
 
   @doc """

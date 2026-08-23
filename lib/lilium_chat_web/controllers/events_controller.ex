@@ -39,6 +39,7 @@ defmodule LiliumChatWeb.EventsController do
         [{params["channel_id"], params["after_event_id"] || ""}]
       else
         cursors = decode_cursors(params["cursors"])
+
         for channel_id <- Channels.my_channel_ids(user_id) do
           {channel_id, Map.get(cursors, channel_id, "")}
         end

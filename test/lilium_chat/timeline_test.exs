@@ -259,7 +259,9 @@ defmodule LiliumChat.TimelineTest do
           "channel_id" => ch,
           "actor_kind" => "user",
           "actor_id" => @viewer
-        }, occurred_at: t(n))
+        },
+        occurred_at: t(n)
+      )
     end
 
     # no cursor → starts at the EARLIEST event, ascending, truncated to `limit`
@@ -315,7 +317,9 @@ defmodule LiliumChat.TimelineTest do
         "channel_id" => private,
         "actor_kind" => "user",
         "actor_id" => @other
-      }, occurred_at: t(1))
+      },
+      occurred_at: t(1)
+    )
 
     # public channel with no explicit membership → still visible
     pub = "dddddddd-0000-7000-8000-dddddddddddd"
@@ -329,7 +333,9 @@ defmodule LiliumChat.TimelineTest do
         "channel_id" => pub,
         "actor_kind" => "user",
         "actor_id" => @other
-      }, occurred_at: t(1))
+      },
+      occurred_at: t(1)
+    )
 
     body = Timeline.global_events(@viewer, [{private, ""}, {pub, ""}])
     # only the public channel's event is projected

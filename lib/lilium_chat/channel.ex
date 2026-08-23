@@ -17,7 +17,7 @@ defmodule LiliumChat.Channel do
 
   use GenServer
 
-  alias LiliumChat.{Errors, Ids, MessageSend, Query, Repo}
+  alias LiliumChat.{ChannelPins, Errors, Ids, MessageMutate, MessageSend, Query, Repo}
 
   require Logger
 
@@ -65,6 +65,46 @@ defmodule LiliumChat.Channel do
     GenServer.call(pid, {:send_message, input}, 30_000)
   end
 
+  # ------------------------------------------------------- message mutations
+
+  @doc """
+  Route `message.edit` / `message.recall` / `message.delete` through the
+  channel's writer process (issue #10). `input` is
+  `%{user_id: binary, command_id: binary, operation: binary, payload: map}`.
+
+  Returns `{:ok, ack_frame}` or `{:error, %LiliumChat.Errors.ApiError{}}`.
+  On a fresh commit the process also broadcasts the lifecycle event frames
+  (`message.updated` / `message.recalled` / `message.deleted`, plus the
+  pin-lifecycle and `system.notice` frames) on `channel:<channel_id>` in
+  event_id order.
+  """
+  def mutate_message(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:mutate_message, input}, 30_000)
+  end
+
+  @doc """
+  Route `channel.pin_message` / `channel.unpin_message` through the channel's
+  writer process (issue #10). `input` is
+  `%{user_id: binary, command_id: binary, payload: map}`.
+
+  Returns `{:ok, ack_frame}` or `{:error, %LiliumChat.Errors.ApiError{}}`.
+  On a fresh commit the process also broadcasts the `channel.pin.*` event
+  frame on `channel:<channel_id>`.
+  """
+  def pin_message(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:pin_message, input}, 30_000)
+  end
+
+  def unpin_message(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:unpin_message, input}, 30_000)
+  end
+
   # --------------------------------------------------------- server callbacks
 
   @impl true
@@ -78,26 +118,36 @@ defmodule LiliumChat.Channel do
   end
 
   @impl true
-  def handle_call({:send_message, input}, _from, state) do
+  def handle_call({:send_message, input}, _from, state),
+    do: run_command(state, fn -> MessageSend.send(state.channel_id, state.seq, input) end)
+
+  @impl true
+  def handle_call({:mutate_message, input}, _from, state),
+    do: run_command(state, fn -> MessageMutate.mutate(state.channel_id, state.seq, input) end)
+
+  @impl true
+  def handle_call({:pin_message, input}, _from, state),
+    do: run_command(state, fn -> ChannelPins.pin_message(state.channel_id, state.seq, input) end)
+
+  @impl true
+  def handle_call({:unpin_message, input}, _from, state),
+    do:
+      run_command(state, fn -> ChannelPins.unpin_message(state.channel_id, state.seq, input) end)
+
+  # Shared dispatch for every write command: run the domain op, rescue the
+  # pre-txn business errors (all raises happen before the event_id is
+  # allocated, so the held seq is unchanged), broadcast the committed event
+  # frames (in event_id order) and reply with the ack.
+  defp run_command(state, fun) do
     {result, new_seq} =
       try do
-        MessageSend.send(state.channel_id, state.seq, input)
+        fun.()
       rescue
-        # Business errors raised during pre-txn resolution (reply target,
-        # attachment / sticker availability) become a command_error, not a
-        # process crash. All raises happen before the event_id is allocated,
-        # so the held seq is unchanged.
         api_error in [Errors.ApiError] ->
           {%{kind: :error, error: api_error}, state.seq}
       end
 
-    case result do
-      %{kind: :created, event_frame: event_frame} ->
-        broadcast(state.channel_id, event_frame)
-
-      _ ->
-        :ok
-    end
+    broadcast_frames(state.channel_id, result)
 
     {:reply, to_reply(result), %{state | seq: new_seq}}
   end
@@ -107,6 +157,16 @@ defmodule LiliumChat.Channel do
   defp to_reply(%{kind: :created, ack_frame: ack}), do: {:ok, ack}
   defp to_reply(%{kind: :cached, ack_frame: ack}), do: {:ok, ack}
   defp to_reply(%{kind: :error, error: api_error}), do: {:error, api_error}
+
+  # `message.send` (issue #9) returns a single `event_frame`; the #10 write
+  # paths return `event_frames` (a list, in event_id order).
+  defp broadcast_frames(channel_id, %{kind: :created, event_frame: frame}),
+    do: Enum.each([frame], fn frame -> broadcast(channel_id, frame) end)
+
+  defp broadcast_frames(channel_id, %{kind: :created, event_frames: frames}),
+    do: Enum.each(frames, fn frame -> broadcast(channel_id, frame) end)
+
+  defp broadcast_frames(_channel_id, _result), do: :ok
 
   defp broadcast(channel_id, frame) do
     topic = "channel:" <> channel_id

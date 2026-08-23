@@ -129,6 +129,22 @@ defmodule LiliumChatWeb.BrowserChannel do
     {:noreply, socket}
   end
 
+  # User-scoped frame EXCLUDING one session (issue #10 read_state_updated:
+  # the calling socket just received the ack — old Worker parity: the hint
+  # goes to the user's OTHER live sessions).
+  @impl true
+  def handle_info(
+        {:broadcast_user, _topic, %{"frame_type" => frame_type} = user_frame, sender_pid},
+        socket
+      ) do
+    live? = socket.assigns[:live?] == true
+    joined? = Map.get(socket, :joined, true) == true
+
+    if live? and joined? and sender_pid != self(), do: push(socket, frame_type, user_frame)
+
+    {:noreply, socket}
+  end
+
   # ------------------------------------------------------ command routing
 
   defp handle_command("message.send", command_id, channel_id, payload, socket) do
@@ -147,6 +163,74 @@ defmodule LiliumChatWeb.BrowserChannel do
       input = %{user_id: user_id, command_id: command_id, payload: payload}
 
       case LiliumChat.Channel.send_message(channel_id, input) do
+        {:ok, ack_frame} ->
+          {:reply, {:ok, ack_frame}, socket}
+
+        {:error, %Errors.ApiError{} = api_error} ->
+          {:reply, {:error, Frames.command_error(command_id, error_map(api_error))}, socket}
+      end
+    end
+  end
+
+  # --------------------------------------------------- message mutations (#10)
+
+  defp handle_command(command, command_id, channel_id, payload, socket)
+       when command in ["message.edit", "message.recall", "message.delete"] do
+    user_id = socket.assigns[:user_id]
+
+    if is_nil(channel_id) do
+      missing_channel_reply(command_id, socket)
+    else
+      input = %{
+        user_id: user_id,
+        command_id: command_id,
+        operation: command,
+        payload: payload
+      }
+
+      case LiliumChat.Channel.mutate_message(channel_id, input) do
+        {:ok, ack_frame} ->
+          {:reply, {:ok, ack_frame}, socket}
+
+        {:error, %Errors.ApiError{} = api_error} ->
+          {:reply, {:error, Frames.command_error(command_id, error_map(api_error))}, socket}
+      end
+    end
+  end
+
+  # ------------------------------------------------- channel pins (#10)
+
+  defp handle_command("channel.pin_message", command_id, channel_id, payload, socket) do
+    dispatch_channel_command(
+      socket,
+      command_id,
+      channel_id,
+      payload,
+      fn cid, input -> LiliumChat.Channel.pin_message(cid, input) end
+    )
+  end
+
+  defp handle_command("channel.unpin_message", command_id, channel_id, payload, socket) do
+    dispatch_channel_command(
+      socket,
+      command_id,
+      channel_id,
+      payload,
+      fn cid, input -> LiliumChat.Channel.unpin_message(cid, input) end
+    )
+  end
+
+  # ---------------------------------------------------- mark_read (#10)
+
+  # User-local (no channel writer): the read_state cursor + the
+  # `read_state_updated` broadcast to the user's other sessions.
+  defp handle_command("channel.mark_read", command_id, channel_id, payload, socket) do
+    user_id = socket.assigns[:user_id]
+
+    if is_nil(channel_id) do
+      missing_channel_reply(command_id, socket)
+    else
+      case LiliumChat.ReadState.mark_read(user_id, command_id, channel_id, payload) do
         {:ok, ack_frame} ->
           {:reply, {:ok, ack_frame}, socket}
 
@@ -190,6 +274,37 @@ defmodule LiliumChatWeb.BrowserChannel do
   defp handle_command(command, command_id, _channel_id, _payload, socket) do
     Logger.debug("BrowserChannel unhandled command: #{command}")
     {:reply, {:error, Frames.command_error(command_id, error_from("INVALID_COMMAND"))}, socket}
+  end
+
+  # Shared dispatch for channel-scoped writer commands (#10): missing
+  # channel_id → CHANNEL_NOT_FOUND, then the writer call → ack / command_error.
+  defp dispatch_channel_command(socket, command_id, channel_id, payload, fun) do
+    user_id = socket.assigns[:user_id]
+
+    if is_nil(channel_id) do
+      missing_channel_reply(command_id, socket)
+    else
+      input = %{user_id: user_id, command_id: command_id, payload: payload}
+
+      case fun.(channel_id, input) do
+        {:ok, ack_frame} ->
+          {:reply, {:ok, ack_frame}, socket}
+
+        {:error, %Errors.ApiError{} = api_error} ->
+          {:reply, {:error, Frames.command_error(command_id, error_map(api_error))}, socket}
+      end
+    end
+  end
+
+  defp missing_channel_reply(command_id, socket) do
+    # Old Worker WS path: a missing channel_id is CHANNEL_NOT_FOUND
+    # ("missing channel_id"), checked before dispatching.
+    {:reply,
+     {:error,
+      Frames.command_error(
+        command_id,
+        error_map(Errors.new("CHANNEL_NOT_FOUND", "missing channel_id"))
+      )}, socket}
   end
 
   # --------------------------------------------------------- live_start

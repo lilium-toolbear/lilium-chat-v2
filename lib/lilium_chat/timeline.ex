@@ -201,6 +201,12 @@ defmodule LiliumChat.Timeline do
         row["event_type"] in @management_or_bot_types ->
           Projections.resolve_actor(payload, profiles)
 
+        # system.notice stores stable refs (contract §10.4) and re-projects
+        # the resolved actor / target_user on replay — all five payload keys
+        # are always present on the wire.
+        row["event_type"] == "system.notice" ->
+          project_notice(payload, profiles)
+
         true ->
           payload
       end
@@ -218,6 +224,20 @@ defmodule LiliumChat.Timeline do
           payload
         )
     end
+  end
+
+  defp project_notice(payload, profiles) do
+    %{
+      "notice_kind" => payload["notice_kind"],
+      "actor" =>
+        payload["actor_user_id"] &&
+          Projections.user_summary(payload["actor_user_id"], profiles),
+      "target_user" =>
+        payload["target_user_id"] &&
+          Projections.user_summary(payload["target_user_id"], profiles),
+      "message_id" => payload["message_id"],
+      "channel_changes" => payload["channel_changes"]
+    }
   end
 
   # Returns the wire *payload* for a message-lifecycle event (nil suppresses the

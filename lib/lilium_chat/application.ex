@@ -25,6 +25,11 @@ defmodule LiliumChat.Application do
       # `LiliumChat.Bots`, which is the bot domain module from issue #16).
       {Registry, keys: :unique, name: LiliumChat.Bots.Registry},
       {DynamicSupervisor, name: LiliumChat.BotConnections, strategy: :one_for_one},
+      # Per-channel writer processes (spec §2.2 / D13, issue #9): registry +
+      # dynamic supervisor for the lazy-started `Channel.<channel_id>` GenServer
+      # that owns the per-channel monotonic event_id counter + serial write.
+      {Registry, keys: :unique, name: LiliumChat.Channels.Registry},
+      {DynamicSupervisor, name: LiliumChat.ChannelConnections, strategy: :one_for_one},
       # Start a worker by calling: LiliumChat.Worker.start_link(arg)
       # {LiliumChat.Worker, arg},
       # Start to serve requests, typically the last entry

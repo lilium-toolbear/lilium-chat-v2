@@ -22,6 +22,7 @@ defmodule LiliumChat.Channel do
     ChannelPins,
     Errors,
     Ids,
+    MemberCommands,
     MessageMutate,
     MessageSend,
     Query,
@@ -163,6 +164,70 @@ defmodule LiliumChat.Channel do
     GenServer.call(pid, {:dissolve_channel, %{user_id: user_id, command_id: key}}, 30_000)
   end
 
+  # ---------------------------------------------------- member management
+
+  @doc """
+  Add a member (`POST /api/chat/channels/{channel_id}/members`, contract
+  §7.2, issue #12). `body` is the JSON request body (target user in the
+  body's `user_id`). Returns `{:ok, response}` or
+  `{:error, %LiliumChat.Errors.ApiError{}}`.
+  """
+  def add_member(user_id, key, channel_id, body) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(
+      pid,
+      {:add_member, %{user_id: user_id, command_id: key, payload: body || %{}}},
+      30_000
+    )
+  end
+
+  @doc """
+  Change a member's role (`PATCH /api/chat/channels/{channel_id}/members/{user_id}`,
+  contract §7.3, issue #12). `body` is the JSON request body. Returns
+  `{:ok, response}` or `{:error, %LiliumChat.Errors.ApiError{}}`.
+  """
+  def update_member_role(user_id, key, channel_id, target_user_id, body) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(
+      pid,
+      {:update_member_role,
+       %{user_id: user_id, command_id: key, target_user_id: target_user_id, payload: body || %{}}},
+      30_000
+    )
+  end
+
+  @doc """
+  Remove a member or self-leave (`DELETE /api/chat/channels/{channel_id}/members/{user_id}`,
+  contract §7.4, issue #12). Returns `{:ok, response}` or
+  `{:error, %LiliumChat.Errors.ApiError{}}`.
+  """
+  def remove_member(user_id, key, channel_id, target_user_id) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(
+      pid,
+      {:remove_member, %{user_id: user_id, command_id: key, target_user_id: target_user_id}},
+      30_000
+    )
+  end
+
+  @doc """
+  Atomically transfer ownership (`POST /api/chat/channels/{channel_id}/owner-transfer`,
+  contract §7.5, issue #12). `body` is the JSON request body. Returns
+  `{:ok, response}` or `{:error, %LiliumChat.Errors.ApiError{}}`.
+  """
+  def transfer_owner(user_id, key, channel_id, body) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(
+      pid,
+      {:transfer_owner, %{user_id: user_id, command_id: key, payload: body || %{}}},
+      30_000
+    )
+  end
+
   # --------------------------------------------------------- server callbacks
 
   @impl true
@@ -205,6 +270,26 @@ defmodule LiliumChat.Channel do
     do:
       run_command(state, fn -> ChannelLifecycle.dissolve(state.channel_id, state.seq, input) end)
 
+  @impl true
+  def handle_call({:add_member, input}, _from, state),
+    do: run_command(state, fn -> MemberCommands.add(state.channel_id, state.seq, input) end)
+
+  @impl true
+  def handle_call({:update_member_role, input}, _from, state),
+    do:
+      run_command(state, fn -> MemberCommands.update_role(state.channel_id, state.seq, input) end)
+
+  @impl true
+  def handle_call({:remove_member, input}, _from, state),
+    do: run_command(state, fn -> MemberCommands.remove(state.channel_id, state.seq, input) end)
+
+  @impl true
+  def handle_call({:transfer_owner, input}, _from, state),
+    do:
+      run_command(state, fn ->
+        MemberCommands.transfer_owner(state.channel_id, state.seq, input)
+      end)
+
   # Shared dispatch for every write command: run the domain op, rescue the
   # pre-txn business errors (all raises happen before the event_id is
   # allocated, so the held seq is unchanged), broadcast the committed event
@@ -234,6 +319,10 @@ defmodule LiliumChat.Channel do
   defp to_reply(%{kind: :created, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :updated, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :dissolved, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :added, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :role_updated, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :removed, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :transferred, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :cached, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :error, error: api_error}), do: {:error, api_error}
 

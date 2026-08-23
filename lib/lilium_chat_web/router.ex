@@ -78,6 +78,11 @@ defmodule LiliumChatWeb.Router do
     # invite preview, personal stickers — all pure reads (A12).
     get "/channels/:channel_id/members", MembersController, :list
     get "/channels/:channel_id/members/:user_id", MembersController, :show
+    # Member management (contract §7.2–§7.5, issue #12).
+    post "/channels/:channel_id/members", MembersController, :create
+    patch "/channels/:channel_id/members/:user_id", MembersController, :update
+    delete "/channels/:channel_id/members/:user_id", MembersController, :delete
+    post "/channels/:channel_id/owner-transfer", MembersController, :transfer_owner
     get "/invites/:invite_code", InvitesController, :preview
     get "/stickers", StickersController, :index
 

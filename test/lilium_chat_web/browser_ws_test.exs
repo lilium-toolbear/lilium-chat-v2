@@ -15,13 +15,11 @@ defmodule LiliumChatWeb.BrowserWSTest do
   use LiliumChatWeb.ChannelCase, async: false
 
   import Ecto.Query
-  import LiliumChat.TestJWT
 
   alias LiliumChat.{Repo, MembershipCache}
   alias LiliumChat.WebSockets.Frames
 
   @uid "6f1e2c3d-4a5b-7c8d-9e0f-1a2b3c4d5e6f"
-  @uid2 "7a2f3d4e-5b6c-8d9e-af10-2b3c4d5e6f7a"
 
   # ------------------------------------------------------------- helpers
 
@@ -29,7 +27,7 @@ defmodule LiliumChatWeb.BrowserWSTest do
     %LiliumChat.Auth.Identity{user_id: uid, is_admin: false}
   end
 
-  defp seed_channel!(channel_id, membership_version \\ 1) do
+  defp seed_channel!(channel_id, membership_version) do
     now = DateTime.utc_now()
 
     Repo.query!(

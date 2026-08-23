@@ -15,6 +15,9 @@ config :lilium_chat, LiliumChat.Repo,
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
 
+# Bot Gateway timing (issue #17) inherits the defaults from config.exs;
+# individual tests override per-test via `Application.put_env`.
+
 # ToolBear JWT secret for tests (spec §6.1).
 config :lilium_chat, :jwt, secret: System.get_env("JWT_SECRET") || "test-only-jwt-secret"
 

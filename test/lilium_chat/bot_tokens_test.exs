@@ -19,7 +19,7 @@ defmodule LiliumChat.BotTokensTest do
     # base64url may itself contain `_`, so slice off the fixed prefix rather
     # than splitting on `_`.
     assert String.starts_with?(token, "lcbot_")
-    rest = String.slice(token, 6..-1)
+    rest = String.slice(token, 6..-1//1)
     # base64url(32 bytes) without padding
     assert String.length(rest) == 43
   end
@@ -76,6 +76,33 @@ defmodule LiliumChat.BotTokensTest do
     bot_id = seed_bot("owner-1", status: "disabled")
     plaintext = BotTokens.generate_plaintext()
     seed_bot_token(bot_id, plaintext)
+
+    assert {:error, %LiliumChat.Errors.ApiError{code: "UNAUTHORIZED"}} =
+             BotTokens.verify(plaintext)
+  end
+
+  test "verify: future expires_at is still valid (issue #17 expiry comparison fix)" do
+    bot_id = seed_bot("owner-1")
+    plaintext = BotTokens.generate_plaintext()
+
+    seed_bot_token(
+      bot_id,
+      plaintext,
+      expires_at: DateTime.utc_now() |> DateTime.add(3_600, :second)
+    )
+
+    assert {:ok, %{bot_id: ^bot_id, scopes: _}} = BotTokens.verify(plaintext)
+  end
+
+  test "verify: expired token with future-looking naive comparison still fails" do
+    bot_id = seed_bot("owner-1")
+    plaintext = BotTokens.generate_plaintext()
+
+    seed_bot_token(
+      bot_id,
+      plaintext,
+      expires_at: DateTime.utc_now() |> DateTime.add(-60, :second)
+    )
 
     assert {:error, %LiliumChat.Errors.ApiError{code: "UNAUTHORIZED"}} =
              BotTokens.verify(plaintext)

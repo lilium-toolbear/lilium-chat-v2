@@ -18,9 +18,21 @@ defmodule LiliumChatWeb.Endpoint do
   socket "/api/chat/ws", LiliumChatWeb.BrowserSocket,
     websocket: [
       subprotocols: ["lilium.chat.v2"],
-      check_origin:
-        Application.compile_env(:lilium_chat, :cors, %{})[:origins] || [],
+      check_origin: Application.compile_env(:lilium_chat, :cors, %{})[:origins] || [],
       connect_info: [:sec_websocket_headers]
+    ]
+
+  # Bot Gateway WS (contract §9.7, issue #17): /api/chat/bot/ws
+  # Subprotocol: lilium.chat.bot.v1 (+ bearer.<bot_token> token carrier).
+  # Token: verified in BotSocket.connect/3 (BotTokens.verify +
+  # chat:runtime:connect scope). Connect failures render the contract
+  # error envelope with the right HTTP status via error_handler.
+  socket "/api/chat/bot/ws", LiliumChatWeb.BotSocket,
+    websocket: [
+      subprotocols: [LiliumChat.BotGateway.api_version()],
+      check_origin: Application.compile_env(:lilium_chat, :cors, %{})[:origins] || [],
+      connect_info: [:sec_websocket_headers],
+      error_handler: {LiliumChatWeb.BotSocket, :handle_connect_error, []}
     ]
 
   # Serve at "/" the static files from "priv/static" directory.

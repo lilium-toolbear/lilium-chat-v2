@@ -35,7 +35,7 @@ defmodule LiliumChat.DebugStub do
     try do
       {head, leftover} = read_head(sock, "")
 
-      [method, path | _] =
+      [_method, path | _] =
         head |> to_string() |> String.split("\r\n") |> hd() |> String.split(" ")
 
       content_length = parse_content_length(head)
@@ -87,7 +87,7 @@ defmodule LiliumChat.DebugStub do
     end
   end
 
-  defp read_body(sock, leftover, content_length) when byte_size(leftover) >= content_length do
+  defp read_body(_sock, leftover, content_length) when byte_size(leftover) >= content_length do
     binary_part(leftover, 0, content_length)
   end
 

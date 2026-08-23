@@ -19,6 +19,12 @@ defmodule LiliumChat.Application do
       {Phoenix.PubSub, name: LiliumChat.PubSub},
       # ETS membership-version cache (spec D8 / §5.2, issue #8)
       LiliumChat.MembershipCache,
+      # Bot Gateway (spec §2.2 / D14, issue #17): registry + dynamic
+      # supervisor for the per-bot `Bot.<bot_id>` processes (lazy start).
+      # The supervisor is named `LiliumChat.BotConnections` (not
+      # `LiliumChat.Bots`, which is the bot domain module from issue #16).
+      {Registry, keys: :unique, name: LiliumChat.Bots.Registry},
+      {DynamicSupervisor, name: LiliumChat.BotConnections, strategy: :one_for_one},
       # Start a worker by calling: LiliumChat.Worker.start_link(arg)
       # {LiliumChat.Worker, arg},
       # Start to serve requests, typically the last entry

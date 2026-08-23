@@ -31,6 +31,17 @@ config :logger, :default_handler,
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 
+# Bot Gateway WS (contract §9.7 / issue #17): connection lease and the
+# offline short-TTL for committed-but-undelivered deliveries. Values are
+# milliseconds; defaults mirror the old Worker (CONNECTION_LEASE_TTL_MS /
+# MESSAGE_EVENT_TTL_MS / STREAM_DEFAULT_TTL_SECONDS). Tests override these
+# per-test via `Application.put_env`.
+config :lilium_chat, :bot_gateway,
+  lease_ttl_ms: 60_000,
+  offline_ttl_ms: 30_000,
+  message_event_ttl_ms: 30_000,
+  stream_ttl_seconds: 300
+
 # CORS / Origin whitelist — copied verbatim from the old repo
 # (lilium-chat/src/allowed-origins.ts, spec §6.3).
 config :lilium_chat, :cors,

@@ -52,6 +52,19 @@ defmodule LiliumChat.BotTokens do
 
   def scopes_from_stored(_), do: []
 
+  # `bot_tokens.expires_at` is a PG `timestamp(6)` (UTC without zone), so
+  # `Repo.query(..., type: true)` decodes it as `%NaiveDateTime{}`. Compare
+  # against the current instant in the same representation — a bare `>` on
+  # `%NaiveDateTime{}` vs `%DateTime{}` would compare struct terms, not
+  # instants.
+  defp expiry_ok?(nil), do: true
+
+  defp expiry_ok?(%NaiveDateTime{} = expires_at),
+    do: NaiveDateTime.compare(expires_at, DateTime.to_naive(DateTime.utc_now())) == :gt
+
+  defp expiry_ok?(%DateTime{} = expires_at),
+    do: DateTime.compare(expires_at, DateTime.utc_now()) == :gt
+
   @doc """
   Verify a bearer token and resolve its scopes.
 
@@ -83,7 +96,7 @@ defmodule LiliumChat.BotTokens do
         active? =
           row["status"] == "active" and
             is_nil(row["revoked_at"]) and
-            (is_nil(row["expires_at"]) or row["expires_at"] > DateTime.utc_now())
+            expiry_ok?(row["expires_at"])
 
         if active? do
           {:ok, %{bot_id: row["bot_id"], scopes: scopes_from_stored(row["scopes"])}}

@@ -48,7 +48,8 @@ defmodule LiliumChat.BotDelivery do
 
   `attrs`: `:channel_id`, `:bot_id`, `:invoker_user_id`, `:bot_command_id`,
   `:command_name`, `:invoked_name`, `:schema_version`, `:definition_hash`,
-  `:options` (map), optional `:invocation_id` (generated when absent).
+  `:options` (map), `:command_id` (the durable operation id), optional
+  `:invocation_id` (generated when absent).
 
   Returns `{:ok, %{delivery_id, invocation_id}}` or
   `{:error, %Errors.ApiError{}}` — on `BOT_OFFLINE` nothing is persisted.
@@ -92,7 +93,7 @@ defmodule LiliumChat.BotDelivery do
             [
               invocation_id,
               attrs[:channel_id],
-              Ids.uuidv7(),
+              attrs[:command_id] || Ids.uuidv7(),
               attrs[:invoker_user_id],
               attrs[:bot_id],
               attrs[:bot_command_id],
@@ -173,13 +174,14 @@ defmodule LiliumChat.BotDelivery do
           Repo.query!(
             """
             INSERT INTO chat_v2.interactions
-              (interaction_id, message_id, component_id, custom_id, actor_user_id,
+              (interaction_id, message_id, pin_id, component_id, custom_id, actor_user_id,
                dedupe_principal_key, command_id, value_json, status, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $10)
             """,
             [
               interaction_id,
               attrs[:message_id],
+              attrs[:pin_id],
               attrs[:component_id],
               attrs[:custom_id],
               attrs[:actor_user_id],
@@ -291,17 +293,21 @@ defmodule LiliumChat.BotDelivery do
 
         case BotEffects.validate(effects, is_official: is_official) do
           {:error, %Errors.ApiError{} = api_error} ->
+            finalize_interaction_failed(row, api_error)
             finalize_failed(row, api_error)
             ack_failed(delivery_id, api_error.code, api_error.message)
 
           {:ok, _} ->
             # The delivery_result path never touches the session_control pin
-            # (that is the session.effects allowlist, contract §9.7.3).
+            # (that is the session.effects allowlist, contract §9.7.3). A
+            # `message_interaction` delivery also finalizes the interaction
+            # lifecycle on the writer (issue #20).
             case Channel.apply_bot_effects(channel_id, %{
                    bot_id: bot_id,
                    effects: effects,
                    is_official: is_official,
-                   allow_session_control: false
+                   allow_session_control: false,
+                   delivery: row
                  }) do
               {:ok, %{effect_results: results}} ->
                 finalize_delivered(row)
@@ -313,12 +319,29 @@ defmodule LiliumChat.BotDelivery do
                 )
 
               {:error, %Errors.ApiError{} = api_error} ->
+                finalize_interaction_failed(row, api_error)
                 finalize_failed(row, api_error)
                 ack_failed(delivery_id, api_error.code, api_error.message)
             end
         end
     end
   end
+
+  # A failed `message_interaction` delivery emits `interaction.failed` on
+  # the channel writer (issue #20, old Worker `finalizeInteractionDelivery`).
+  defp finalize_interaction_failed(%{"kind" => "message_interaction"} = row, api_error) do
+    Channel.finalize_interaction(row["channel_id"], %{
+      interaction_id: row["interaction_id"],
+      bot_id: row["bot_id"],
+      success: false,
+      error_code: api_error.code,
+      error_message: api_error.message
+    })
+
+    :ok
+  end
+
+  defp finalize_interaction_failed(_row, _api_error), do: :ok
 
   # ------------------------------------------------------------- offline TTL
 
@@ -567,7 +590,7 @@ defmodule LiliumChat.BotDelivery do
     Query.rows(
       Repo.query(
         """
-        SELECT delivery_id, kind, channel_id, invocation_id, interaction_id, status
+        SELECT delivery_id, channel_id, bot_id, kind, invocation_id, interaction_id, status
         FROM chat_v2.bot_deliveries
         WHERE delivery_id = $1 AND bot_id = $2
         """,

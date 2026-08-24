@@ -768,6 +768,17 @@ defmodule LiliumChat.ChannelPins do
     pin_id = Keyword.get(opts, :pin_id) || Ids.uuidv7(now_ms)
     component_id = Keyword.get(opts, :component_id) || Ids.uuidv7(now_ms + 2)
 
+    # Only pass the optional projection keys when actually provided — an
+    # explicit `status_text: nil` (from `Keyword.get`) would override the
+    # default status text in `session_control_projection/6`.
+    projection_opts =
+      [
+        projection_id: Keyword.get(opts, :projection_id) || Ids.uuidv7(now_ms + 1),
+        stop_disabled: Keyword.get(opts, :stop_disabled, false)
+      ] ++
+        if(Keyword.has_key?(opts, :stop_label), do: [stop_label: opts[:stop_label]], else: []) ++
+        if(Keyword.has_key?(opts, :status_text), do: [status_text: opts[:status_text]], else: [])
+
     projection =
       session_control_projection(
         channel_id,
@@ -775,10 +786,7 @@ defmodule LiliumChat.ChannelPins do
         command_name,
         started_by_display_name,
         now,
-        projection_id: Keyword.get(opts, :projection_id) || Ids.uuidv7(now_ms + 1),
-        stop_disabled: Keyword.get(opts, :stop_disabled, false),
-        stop_label: Keyword.get(opts, :stop_label),
-        status_text: Keyword.get(opts, :status_text)
+        projection_opts
       )
 
     # Old Worker session-pin creation: `pinned_at` stays null; `expires_at`

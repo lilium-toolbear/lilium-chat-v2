@@ -231,6 +231,21 @@ defmodule LiliumChat.BotConnection do
     end
   end
 
+  @doc """
+  Route a `session.start_ack` frame (issue #20, contract §9.7.4) through
+  the bot process: activates the `starting` session on its channel writer.
+  `parsed` is the `BotGateway.parse_session_start_ack/1` result.
+  """
+  def deliver_session_start_ack(bot_id, %{session_id: session_id}) do
+    if pid = pid_for(bot_id) do
+      try do
+        GenServer.call(pid, {:deliver_session_start_ack, session_id}, 30_000)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+  end
+
   # --------------------------------------------------------------- detach
 
   @doc """
@@ -372,6 +387,20 @@ defmodule LiliumChat.BotConnection do
           session_id: session_id,
           last_received_seq: last_received_seq
         })
+
+      _ ->
+        :ok
+    end
+
+    {:reply, %{"status" => "ok"}, state |> schedule_lease()}
+  end
+
+  # `session.start_ack` (issue #20): activate the `starting` session on its
+  # channel writer. The start-ack body carries only the session id.
+  def handle_call({:deliver_session_start_ack, session_id}, _from, state) do
+    case StatefulSessions.get(session_id) do
+      %{"channel_id" => channel_id} ->
+        Channel.session_start_ack(channel_id, %{session_id: session_id})
 
       _ ->
         :ok

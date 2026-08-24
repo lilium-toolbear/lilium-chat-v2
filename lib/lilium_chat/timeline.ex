@@ -252,6 +252,29 @@ defmodule LiliumChat.Timeline do
         row["event_type"] in @replay_message_types ->
           project_message_event(row, payload, profiles, extras)
 
+        # `command.invoked` (contract §9.6.2): the wire `command_name` is the
+        # invoked name when present, else the canonical command_name.
+        row["event_type"] == "command.invoked" ->
+          payload
+          |> Map.put("command_name", payload["invoked_name"] || payload["command_name"])
+          |> Projections.resolve_actor(profiles)
+
+        # `interaction.created` (contract §9.6.2): `component_label` resolved
+        # from the target message's CURRENT components_json (message locator
+        # only; pin-locator interactions have no message row).
+        row["event_type"] == "interaction.created" ->
+          component_label = component_label_for(extras, payload)
+
+          payload
+          |> Projections.resolve_actor(profiles)
+          |> then(fn wire ->
+            if component_label do
+              Map.put(wire, "component_label", component_label)
+            else
+              wire
+            end
+          end)
+
         row["event_type"] in @management_or_bot_types ->
           Projections.resolve_actor(payload, profiles)
 
@@ -277,6 +300,26 @@ defmodule LiliumChat.Timeline do
           row["occurred_at"],
           payload
         )
+    end
+  end
+
+  # `component_label` (contract §9.6): the `label` of the component matched
+  # by `component_id` on the target message's current `components_json`.
+  defp component_label_for(extras, payload) do
+    case payload["message_id"] && Map.get(extras.messages, payload["message_id"]) do
+      %{"components_json" => components_json} ->
+        component_id = payload["component_id"]
+
+        components_json
+        |> Projections.json_list()
+        |> Enum.find(&(is_map(&1) and &1["component_id"] == component_id))
+        |> case do
+          %{"label" => label} when is_binary(label) and label != "" -> label
+          _ -> nil
+        end
+
+      _ ->
+        nil
     end
   end
 
@@ -671,7 +714,19 @@ defmodule LiliumChat.Timeline do
     raw_rows
     |> Enum.map(fn row ->
       payload = Projections.json_map(row["payload"]) || %{}
-      payload["message"] && payload["message"]["message_id"]
+
+      cond do
+        payload["message"] && payload["message"]["message_id"] ->
+          payload["message"]["message_id"]
+
+        # `interaction.created` stores the target message id at the top
+        # level — needed for the `component_label` projection (§9.6.2).
+        row["event_type"] == "interaction.created" ->
+          payload["message_id"]
+
+        true ->
+          nil
+      end
     end)
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()

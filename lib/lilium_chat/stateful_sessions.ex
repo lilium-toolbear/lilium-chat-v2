@@ -982,7 +982,10 @@ defmodule LiliumChat.StatefulSessions do
       Query.rows(
         Repo.query(
           """
-          SELECT message_id, sender_kind, sender_bot_id, status, components_json
+          SELECT message_id, command_id, sender_kind, sender_bot_id, status,
+                 components_json, text, type, format, reply_to,
+                 reply_snapshot_json, invocation_json, stream_state,
+                 created_at, updated_at
           FROM chat_v2.messages
           WHERE message_id = $1 AND channel_id = $2
           """,
@@ -1028,14 +1031,20 @@ defmodule LiliumChat.StatefulSessions do
       locator_key: row["message_id"],
       component_id: attrs[:component_id],
       custom_id: attrs[:custom_id],
-      value: attrs[:value]
+      value: attrs[:value],
+      exclusive: policy_of(component) == "exclusive" and not exclusive_used?,
+      message_row: row
     })
   end
 
   # Shared bot-interaction commit: BOT_OFFLINE precheck, then the idempotent
   # {interaction row + bot delivery + `interaction.created`} batch. Pin
-  # interactions store the pin id in `interactions.message_id` (old Worker
-  # double-write; v2's table has no `pin_id` column).
+  # interactions store the pin id in `interactions.message_id` AND
+  # `interactions.pin_id` (old Worker double-write). An `exclusive`
+  # message-locator submit additionally locks the component
+  # (`components_json` disabled + `message.updated` event) in the SAME txn,
+  # before the `interaction.created` event (old Worker
+  # `emitExclusiveComponentLock`).
   defp submit_bot_interaction(channel_id, seq, user_id, command_id, request_hash, attrs) do
     unless BotConnection.online?(attrs[:bot_id]) do
       raise Errors.new("BOT_OFFLINE", "The bot is currently offline.")
@@ -1045,7 +1054,28 @@ defmodule LiliumChat.StatefulSessions do
     now_ms = DateTime.to_unix(now, :millisecond)
 
     interaction_id = Ids.uuidv7(now_ms)
-    {event_id, new_seq} = Ids.monotonic_uuidv7(seq, now_ms)
+
+    # Event id order (old Worker): the exclusive-lock `message.updated`
+    # first (nowMs+1), then `interaction.created` (nowMs+2).
+    {lock_event_id, seq1} =
+      if attrs[:exclusive] do
+        Ids.monotonic_uuidv7(seq, now_ms + 1)
+      else
+        {nil, seq}
+      end
+
+    {event_id, new_seq} = Ids.monotonic_uuidv7(seq1, now_ms + 2)
+
+    lock =
+      if attrs[:exclusive] do
+        build_exclusive_lock(
+          channel_id,
+          attrs[:message_row],
+          attrs[:component_id],
+          lock_event_id,
+          now
+        )
+      end
 
     case Idempotency.run_writer_operation(
            "user",
@@ -1054,6 +1084,28 @@ defmodule LiliumChat.StatefulSessions do
            command_id,
            request_hash,
            fn ->
+             if lock do
+               Repo.query!(
+                 """
+                 UPDATE chat_v2.messages
+                 SET components_json = $3, updated_at = $4
+                 WHERE message_id = $1 AND channel_id = $2
+                 """,
+                 [attrs[:locator_key], channel_id, lock.components_json, now],
+                 type: true
+               )
+
+               insert_event(
+                 lock_event_id,
+                 "message.updated",
+                 channel_id,
+                 lock.persisted_payload,
+                 now,
+                 actor_kind: "system",
+                 actor_id: nil
+               )
+             end
+
              {:ok, _} =
                BotDelivery.commit_interaction(%{
                  channel_id: channel_id,
@@ -1092,6 +1144,18 @@ defmodule LiliumChat.StatefulSessions do
                actor_id: user_id
              )
 
+             frames =
+               if(lock, do: [lock.frame], else: []) ++
+                 [
+                   Projections.build_event_frame(
+                     event_id,
+                     "interaction.created",
+                     channel_id,
+                     now,
+                     interaction_created_wire(persisted, user_id, attrs)
+                   )
+                 ]
+
              # Live payload = what the read path (`Projections.resolve_actor`)
              # re-projects on history/replay: stable refs + resolved actor.
              %{
@@ -1101,15 +1165,7 @@ defmodule LiliumChat.StatefulSessions do
                  "interaction_id" => interaction_id,
                  "event_id" => event_id
                },
-               event_frames: [
-                 Projections.build_event_frame(
-                   event_id,
-                   "interaction.created",
-                   channel_id,
-                   now,
-                   Projections.resolve_actor(persisted, Profiles.resolve([user_id]))
-                 )
-               ]
+               event_frames: frames
              }
            end
          ) do
@@ -1122,6 +1178,93 @@ defmodule LiliumChat.StatefulSessions do
       {:error, api_error} ->
         raise api_error
     end
+  end
+
+  # Live `interaction.created` wire payload (contract §9.6): resolved actor +
+  # `component_label` from the target message's CURRENT components_json
+  # (message locator only — pin-locator interactions have no message row),
+  # matching what the read path re-projects on replay (§9.6.2).
+  defp interaction_created_wire(persisted, user_id, attrs) do
+    wire = Projections.resolve_actor(persisted, Profiles.resolve([user_id]))
+
+    case attrs[:message_row] do
+      %{"components_json" => components_json} ->
+        component_id = attrs[:component_id]
+
+        case components_json
+             |> Projections.json_list()
+             |> Enum.find(&(is_map(&1) and &1["component_id"] == component_id)) do
+          %{"label" => label} when is_binary(label) and label != "" ->
+            Map.put(wire, "component_label", label)
+
+          _ ->
+            wire
+        end
+
+      _ ->
+        wire
+    end
+  end
+
+  # The `exclusive` component lock (old Worker `emitExclusiveComponentLock`):
+  # `components_json` with the component disabled + the persisted
+  # `message.updated` payload + the live frame. The message projection
+  # reflects the locked components.
+  defp build_exclusive_lock(channel_id, message_row, component_id, lock_event_id, now) do
+    components = Projections.json_list(message_row["components_json"])
+
+    locked_components =
+      Enum.map(components, fn component ->
+        if is_map(component) and component["component_id"] == component_id do
+          Map.put(component, "disabled", true)
+        else
+          component
+        end
+      end)
+
+    updated_row = Map.put(message_row, "updated_at", now)
+
+    live_message =
+      Projections.project_message(updated_row, %{}, %{
+        attachments: [],
+        mentions: [],
+        sticker: nil,
+        components: locked_components,
+        command_invocation: nil,
+        reply_target_status: nil
+      })
+
+    persisted_payload = %{
+      "message" => %{
+        "message_id" => updated_row["message_id"],
+        "command_id" => updated_row["command_id"],
+        "channel_id" => updated_row["channel_id"],
+        "sender_kind" => updated_row["sender_kind"],
+        "sender_user_id" => updated_row["sender_user_id"],
+        "sender_bot_id" => updated_row["sender_bot_id"],
+        "status" => updated_row["status"],
+        "created_at" => Projections.format_ts(updated_row["created_at"]),
+        "updated_at" => Projections.format_ts(now),
+        "edited_at" => nil,
+        "deleted_at" => nil,
+        "deleted_by" => nil,
+        "recalled_at" => nil,
+        "stream_state" => "none",
+        "reply_to" => updated_row["reply_to"],
+        "reply_snapshot_json" => updated_row["reply_snapshot_json"],
+        "type" => updated_row["type"],
+        "format" => updated_row["format"],
+        "text" => updated_row["text"],
+        "invocation_json" => updated_row["invocation_json"]
+      }
+    }
+
+    frame =
+      Projections.build_event_frame(lock_event_id, "message.updated", channel_id, now, %{
+        "message" => live_message
+      })
+
+    %{components_json: locked_components, persisted_payload: persisted_payload, frame: frame}
   end
 
   # Old Worker `findMessageComponentIncludingDisabled`: disabled components
@@ -1289,6 +1432,348 @@ defmodule LiliumChat.StatefulSessions do
     )
     |> List.first()
     |> Map.get("n", 0)
+  end
+
+  # --------------------------------------------------- session start (#20)
+
+  @doc """
+  Activate a `starting` session on the bot's `session.start_ack` (issue #20,
+  old Worker `botSessionStarted`): `status='active'` + the
+  `stateful_session.started` event + the platform `session_control` pin
+  (`channel.pin.set`) in ONE txn. Returns `{result, new_seq}` with
+  `result.event_frames` (started + pin.set, in event_id order) and
+  `result.arm_expiry` (the TTL timer target for the writer).
+  """
+  def handle_start_ack(channel_id, seq, attrs) do
+    session = get(attrs[:session_id])
+
+    if is_nil(session) or session["channel_id"] != channel_id do
+      raise Errors.new("STATEFUL_SESSION_NOT_FOUND", "session not found")
+    end
+
+    if session["status"] != "starting" do
+      raise Errors.new("STATEFUL_SESSION_NOT_ACTIVE", "session is not in starting state")
+    end
+
+    now = DateTime.utc_now()
+    now_ms = DateTime.to_unix(now, :millisecond)
+    summary = Projections.json_map(session["summary_json"]) || %{}
+    command_name = summary["command_name"] || session["bot_command_id"]
+    started_by_display_name = summary["started_by_display_name"] || session["started_by_user_id"]
+
+    {started_event_id, seq1} = Ids.monotonic_uuidv7(seq, now_ms)
+    {pin_event_id, seq2} = Ids.monotonic_uuidv7(seq1, now_ms + 1)
+
+    started_payload = %{
+      "session_id" => session["session_id"],
+      "bot_command_id" => session["bot_command_id"],
+      "command_name" => command_name,
+      "status" => "active",
+      "started_by_user_id" => session["started_by_user_id"],
+      "started_at" => Projections.format_ts(session["started_at"]),
+      "expires_at" => Projections.format_ts(session["expires_at"])
+    }
+
+    {:ok, _} =
+      Repo.transaction(fn ->
+        Repo.query!(
+          """
+          UPDATE chat_v2.stateful_command_sessions
+          SET status = 'active'
+          WHERE session_id = $1
+          """,
+          [session["session_id"]],
+          type: true
+        )
+
+        insert_event(
+          started_event_id,
+          "stateful_session.started",
+          channel_id,
+          started_payload,
+          now
+        )
+
+        # The session_control pin is (re)created on activation (old Worker:
+        # delete any existing control pin first, then upsert).
+        case ChannelPins.get_session_control_pin(channel_id) do
+          nil ->
+            :ok
+
+          existing ->
+            Repo.query!("DELETE FROM chat_v2.channel_pins WHERE pin_id = $1", [
+              existing["pin_id"]
+            ])
+        end
+
+        pin_row =
+          ChannelPins.upsert_session_control(
+            channel_id,
+            session["session_id"],
+            command_name,
+            started_by_display_name,
+            expires_at: session["expires_at"],
+            last_pin_event_id: pin_event_id
+          )
+
+        pin_wire = ChannelPins.project_wire(pin_row, %{})
+        insert_event(pin_event_id, "channel.pin.set", channel_id, %{"pin" => pin_wire}, now)
+      end)
+
+    frames = [
+      Projections.build_event_frame(
+        started_event_id,
+        "stateful_session.started",
+        channel_id,
+        now,
+        started_payload
+      ),
+      Projections.build_event_frame(
+        pin_event_id,
+        "channel.pin.set",
+        channel_id,
+        now,
+        %{"pin" => ChannelPins.project_wire(ChannelPins.get_session_control_pin(channel_id), %{})}
+      )
+    ]
+
+    {
+      %{
+        kind: :session_started_ack,
+        event_frames: frames,
+        arm_expiry: %{session_id: session["session_id"], at: session["expires_at"]}
+      },
+      seq2
+    }
+  end
+
+  # ------------------------------------------- interaction lifecycle (#20)
+
+  @doc """
+  Finalize a `message_interaction` delivery lifecycle (issue #20, old Worker
+  `finalizeInteractionDelivery`): the interaction row status update + the
+  `interaction.completed` / `interaction.failed` timeline event, on the
+  channel writer (seq-owned). Idempotent: a terminal interaction replays
+  with no new event.
+
+  `attrs`: `:interaction_id`, `:bot_id`, `:success`, optional
+  `:error_code` / `:error_message`. Returns `{result, new_seq}` with
+  `result.event_frames` (empty for replays / unknown rows).
+  """
+  def finalize_interaction(channel_id, seq, attrs) do
+    interaction_id = attrs[:interaction_id]
+
+    row =
+      Query.rows(
+        Repo.query(
+          """
+          SELECT interaction_id, message_id, pin_id, component_id, command_id, status
+          FROM chat_v2.interactions
+          WHERE interaction_id = $1
+          """,
+          [interaction_id],
+          type: true
+        )
+      )
+      |> List.first()
+
+    cond do
+      is_nil(row) ->
+        {%{kind: :interaction_finalized, event_frames: []}, seq}
+
+      row["status"] in ["completed", "failed"] ->
+        # Idempotent replay of a terminal interaction — no repeat event
+        # (contract §9.6.1).
+        {%{kind: :interaction_finalized, event_frames: []}, seq}
+
+      true ->
+        do_finalize_interaction(channel_id, seq, row, attrs)
+    end
+  end
+
+  defp do_finalize_interaction(channel_id, seq, row, attrs) do
+    now = DateTime.utc_now()
+    now_ms = DateTime.to_unix(now, :millisecond)
+    {event_id, new_seq} = Ids.monotonic_uuidv7(seq, now_ms)
+
+    # The current message row (message-locator completions only) — loaded
+    # for the content-bearing wire projection; the persisted payload stores
+    # the lifecycle shape (contract §9.6.2, no UserSummary in storage).
+    message_row =
+      if attrs[:success] and not is_binary(row["pin_id"]) do
+        Query.rows(
+          Repo.query(
+            """
+            SELECT message_id, command_id, channel_id, sender_kind, sender_user_id,
+                   sender_bot_id, type, format, status, text, reply_to,
+                   reply_snapshot_json, components_json, invocation_json, stream_state,
+                   created_at, updated_at, edited_at, deleted_at, deleted_by, recalled_at
+            FROM chat_v2.messages
+            WHERE message_id = $1 AND channel_id = $2
+            """,
+            [row["message_id"], channel_id],
+            type: true
+          )
+        )
+        |> List.first()
+      end
+
+    payload =
+      Repo.transaction(fn ->
+        if attrs[:success] do
+          Repo.query!(
+            """
+            UPDATE chat_v2.interactions
+            SET status = 'completed', completed_at = $2, updated_at = $2, error_code = NULL
+            WHERE interaction_id = $1
+            """,
+            [row["interaction_id"], now],
+            type: true
+          )
+
+          if is_binary(row["pin_id"]) do
+            # Pin-locator completion (old Worker `insertPinInteractionCompletedEvent`):
+            # `{command_id, channel_id, event_id, pin_id}` — no content-bearing message.
+            payload = %{
+              "command_id" => row["command_id"],
+              "channel_id" => channel_id,
+              "event_id" => event_id,
+              "pin_id" => row["pin_id"]
+            }
+
+            insert_event(event_id, "interaction.completed", channel_id, payload, now,
+              actor_kind: "bot",
+              actor_id: attrs[:bot_id]
+            )
+
+            payload
+          else
+            # Message-locator completion: content-bearing — the CURRENT
+            # message lifecycle payload (reflecting applied effects).
+            message_payload = build_message_lifecycle_payload(message_row)
+
+            payload = %{
+              "command_id" => row["command_id"],
+              "channel_id" => channel_id,
+              "event_id" => event_id,
+              "message" => message_payload
+            }
+
+            insert_event(event_id, "interaction.completed", channel_id, payload, now,
+              actor_kind: "bot",
+              actor_id: attrs[:bot_id]
+            )
+
+            payload
+          end
+        else
+          Repo.query!(
+            """
+            UPDATE chat_v2.interactions
+            SET status = 'failed', completed_at = $2, updated_at = $2, error_code = $3
+            WHERE interaction_id = $1
+            """,
+            [
+              row["interaction_id"],
+              now,
+              attrs[:error_code] || "BOT_EFFECT_INVALID"
+            ],
+            type: true
+          )
+
+          payload = %{
+            "command_id" => row["command_id"],
+            "error_code" => attrs[:error_code] || "BOT_EFFECT_INVALID",
+            "error_message" => attrs[:error_message] || "interaction delivery failed",
+            "retryable" => false
+          }
+
+          insert_event(event_id, "interaction.failed", channel_id, payload, now,
+            actor_kind: "bot",
+            actor_id: attrs[:bot_id]
+          )
+
+          payload
+        end
+      end)
+
+    {:ok, stored_payload} = payload
+
+    # Wire projection: message-locator completions carry the full Browser
+    # message (components included); everything else matches the stored
+    # payload (old Worker `insertInteractionCompletedEvent`).
+    wire_payload =
+      if attrs[:success] and not is_binary(row["pin_id"]) do
+        Map.put(stored_payload, "message", project_message_full(message_row))
+      else
+        stored_payload
+      end
+
+    frame =
+      Projections.build_event_frame(
+        event_id,
+        if(attrs[:success], do: "interaction.completed", else: "interaction.failed"),
+        channel_id,
+        now,
+        wire_payload
+      )
+
+    {%{kind: :interaction_finalized, event_frames: [frame]}, new_seq}
+  end
+
+  defp project_message_full(nil), do: nil
+
+  defp project_message_full(row) do
+    bot_summary =
+      if row["sender_bot_id"] do
+        %{
+          "bot_id" => row["sender_bot_id"],
+          "display_name" => row["sender_bot_display_name"],
+          "avatar_url" => row["sender_bot_avatar_url"]
+        }
+      end
+
+    Projections.project_message(row, %{}, %{
+      attachments: [],
+      mentions: [],
+      sticker: nil,
+      components: Projections.json_list(row["components_json"]),
+      command_invocation:
+        case Projections.json_map(row["invocation_json"]) do
+          map when is_map(map) and map != %{} -> map
+          _ -> nil
+        end,
+      bot_summary: bot_summary
+    })
+  end
+
+  # `message.*` persisted shape for content-bearing events (same builder the
+  # read path re-projects from; §9.6.2 — no UserSummary in storage).
+  defp build_message_lifecycle_payload(nil), do: nil
+
+  defp build_message_lifecycle_payload(row) do
+    %{
+      "message_id" => row["message_id"],
+      "command_id" => row["command_id"],
+      "channel_id" => row["channel_id"],
+      "sender_kind" => row["sender_kind"],
+      "sender_user_id" => row["sender_user_id"],
+      "sender_bot_id" => row["sender_bot_id"],
+      "status" => row["status"],
+      "created_at" => Projections.format_ts(row["created_at"]),
+      "updated_at" => Projections.format_ts(row["updated_at"]),
+      "edited_at" => Projections.format_ts(row["edited_at"]),
+      "deleted_at" => Projections.format_ts(row["deleted_at"]),
+      "deleted_by" => row["deleted_by"],
+      "recalled_at" => Projections.format_ts(row["recalled_at"]),
+      "stream_state" => row["stream_state"] || "none",
+      "reply_to" => row["reply_to"],
+      "reply_snapshot_json" => row["reply_snapshot_json"],
+      "type" => row["type"],
+      "format" => row["format"],
+      "text" => row["text"],
+      "invocation_json" => row["invocation_json"]
+    }
   end
 
   # -------------------------------------------------- bot reconnect resume

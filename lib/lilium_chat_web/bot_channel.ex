@@ -140,6 +140,22 @@ defmodule LiliumChatWeb.BotChannel do
     end
   end
 
+  # `session.start_ack` (issue #20): the bot accepted a `session.start` —
+  # the channel writer activates the session + creates the session-control
+  # pin.
+  def handle_in("session.start_ack", payload, socket) do
+    case BotGateway.parse_session_start_ack(payload) do
+      {:ok, parsed} ->
+        BotConnection.deliver_session_start_ack(socket.assigns[:bot_id], parsed)
+        {:reply, {:ok, %{"status" => "ok"}}, socket}
+
+      {:error, reason} ->
+        Logger.debug("bot session.start_ack rejected for #{socket.assigns[:bot_id]}: #{reason}")
+
+        {:noreply, socket}
+    end
+  end
+
   def handle_in(event, _payload, socket) do
     Logger.debug("BotChannel unhandled frame type: #{event}")
     {:noreply, socket}

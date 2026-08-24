@@ -23,6 +23,7 @@ defmodule LiliumChat.Channel do
     ChannelJoin,
     ChannelLifecycle,
     ChannelPins,
+    CommandInvoke,
     Dms,
     Errors,
     Ids,
@@ -399,6 +400,33 @@ defmodule LiliumChat.Channel do
     GenServer.call(pid, {:submit_interaction, input}, 30_000)
   end
 
+  # --------------------------------------------------- command.invoke (#20)
+
+  @doc "`command.invoke` (contract §9.5 / issue #20)."
+  def invoke_command(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:invoke_command, input}, 30_000)
+  end
+
+  @doc "`session.start_ack` (issue #20): activate a `starting` session."
+  def session_start_ack(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:session_start_ack, input}, 30_000)
+  end
+
+  @doc """
+  Finalize an interaction delivery lifecycle (issue #20): `interaction.completed`
+  / `interaction.failed` event + the row status update, on the channel
+  writer (seq-owned). Used by the `delivery_result` failure path.
+  """
+  def finalize_interaction(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:finalize_interaction, input}, 30_000)
+  end
+
   # --------------------------------------------------------- server callbacks
 
   @impl true
@@ -491,16 +519,37 @@ defmodule LiliumChat.Channel do
   @impl true
   def handle_call({:apply_bot_effects, input}, _from, state) do
     run_command(state, fn ->
-      case BotEffects.apply_effects(
-             state.channel_id,
-             state.seq,
-             input[:bot_id],
-             input[:effects] || [],
-             is_official: input[:is_official] || false,
-             allow_session_control: input[:allow_session_control] || false,
-             session_id: input[:session_id]
-           ) do
-        {result, new_seq} -> {Map.put(result, :kind, :applied), new_seq}
+      {result, new_seq} =
+        case BotEffects.apply_effects(
+               state.channel_id,
+               state.seq,
+               input[:bot_id],
+               input[:effects] || [],
+               is_official: input[:is_official] || false,
+               allow_session_control: input[:allow_session_control] || false,
+               session_id: input[:session_id]
+             ) do
+          {result, new_seq} -> {Map.put(result, :kind, :applied), new_seq}
+        end
+
+      # `delivery_result` on a `message_interaction` delivery completes the
+      # interaction lifecycle in the same writer turn (issue #20): the
+      # `interaction.completed` event reflects the message AFTER the effects
+      # applied (old Worker `finalizeInteractionDelivery`).
+      case input[:delivery] do
+        %{"kind" => "message_interaction"} = row ->
+          {final, seq2} =
+            StatefulSessions.finalize_interaction(state.channel_id, new_seq, %{
+              interaction_id: row["interaction_id"],
+              bot_id: input[:bot_id],
+              success: true
+            })
+
+          {Map.update(result, :event_frames, final.event_frames, &(&1 ++ final.event_frames)),
+           seq2}
+
+        _ ->
+          {result, new_seq}
       end
     end)
   end
@@ -559,6 +608,39 @@ defmodule LiliumChat.Channel do
           user_id: input[:user_id],
           command_id: input[:command_id],
           payload: input[:payload] || %{}
+        })
+      end)
+
+  @impl true
+  def handle_call({:invoke_command, input}, _from, state),
+    do:
+      run_command(state, fn ->
+        CommandInvoke.invoke(state.channel_id, state.seq, %{
+          user_id: input[:user_id],
+          command_id: input[:command_id],
+          payload: input[:payload] || %{}
+        })
+      end)
+
+  @impl true
+  def handle_call({:session_start_ack, input}, _from, state),
+    do:
+      run_command(state, fn ->
+        StatefulSessions.handle_start_ack(state.channel_id, state.seq, %{
+          session_id: input[:session_id]
+        })
+      end)
+
+  @impl true
+  def handle_call({:finalize_interaction, input}, _from, state),
+    do:
+      run_command(state, fn ->
+        StatefulSessions.finalize_interaction(state.channel_id, state.seq, %{
+          interaction_id: input[:interaction_id],
+          bot_id: input[:bot_id],
+          success: input[:success],
+          error_code: input[:error_code],
+          error_message: input[:error_message]
         })
       end)
 
@@ -623,6 +705,11 @@ defmodule LiliumChat.Channel do
   defp to_reply(%{kind: :input_acked}), do: {:ok, %{}}
   defp to_reply(%{kind: :stopped, reply: reply}), do: {:ok, reply}
   defp to_reply(%{kind: :interaction_submitted, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :invoked, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :session_started, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :session_started_ack}), do: {:ok, %{}}
+  defp to_reply(%{kind: :interaction_finalized}), do: {:ok, %{}}
+  defp to_reply(%{kind: :session_busy, error: api_error}), do: {:error, api_error}
   defp to_reply(%{kind: :closed}), do: {:ok, %{}}
   defp to_reply(%{kind: :error, error: api_error}), do: {:error, api_error}
 
@@ -675,11 +762,29 @@ defmodule LiliumChat.Channel do
     :ok
   end
 
+  # Session-start timeout (issue #20, old Worker `SESSION_START_TIMEOUT_MS`):
+  # force-close a `starting` session the bot never acked.
+  defp arm_timers(%{arm_start_timeout: %{session_id: session_id, at: at}}) do
+    Process.send_after(self(), {:session_start_timeout, session_id}, until_ms(at))
+    :ok
+  end
+
+  # Session TTL expiry (issue #20 start_ack): `active` sessions arm the
+  # expire timer on activation (the restart path already re-arms it). The
+  # target may decode as NaiveDateTime (raw `Repo.query` shape) — use the
+  # dual-type `to_unix_ms/1`.
+  defp arm_timers(%{arm_expiry: %{session_id: session_id, at: at}}) do
+    now_ms = DateTime.to_unix(DateTime.utc_now(), :millisecond)
+    Process.send_after(self(), {:session_expiry, session_id}, max(to_unix_ms(at) - now_ms, 0))
+    :ok
+  end
+
   defp arm_timers(_result), do: :ok
 
   # (Re)arm the session timers from durable state (writer (re)start,
   # old Worker alarm parity): `closing` sessions re-arm their stop grace;
-  # `starting` / `active` / `suspended` sessions re-arm the TTL expiry.
+  # `starting` sessions re-arm the start timeout; `starting` / `active` /
+  # `suspended` sessions re-arm the TTL expiry.
   defp rearm_session_timers(state) do
     now_ms = DateTime.to_unix(DateTime.utc_now(), :millisecond)
 
@@ -692,6 +797,16 @@ defmodule LiliumChat.Channel do
             self(),
             {:session_stop_grace, session_id},
             max(to_unix_ms(row["stop_grace_at"]) - now_ms, 0)
+          )
+
+        row["status"] == "starting" ->
+          start_timeout_at =
+            DateTime.add(row["started_at"], CommandInvoke.start_timeout_ms(), :millisecond)
+
+          Process.send_after(
+            self(),
+            {:session_start_timeout, session_id},
+            max(to_unix_ms(start_timeout_at) - now_ms, 0)
           )
 
         row["expires_at"] != nil ->
@@ -755,6 +870,26 @@ defmodule LiliumChat.Channel do
         end
 
       _ ->
+        {:noreply, state}
+    end
+  end
+
+  # Session-start timeout (issue #20): a `starting` session whose bot never
+  # acked within `SESSION_START_TIMEOUT_MS` is force-closed (`start_timeout`).
+  @impl true
+  def handle_info({:session_start_timeout, session_id}, state) do
+    case StatefulSessions.get(session_id) do
+      %{"status" => "starting", "channel_id" => channel_id} ->
+        if channel_id == state.channel_id do
+          run_command_info(state, fn ->
+            StatefulSessions.close(state.channel_id, state.seq, session_id, "start_timeout")
+          end)
+        else
+          {:noreply, state}
+        end
+
+      _ ->
+        # Already activated / closed — the timer is stale.
         {:noreply, state}
     end
   end

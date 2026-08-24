@@ -276,6 +276,22 @@ defmodule LiliumChat.BotGateway do
   end
 
   @doc """
+  Parse a `session.start_ack` frame (bot → server, contract §9.7.4 / issue
+  #20). Returns `{:ok, %{session_id}}` or `{:error, reason}`.
+  """
+  def parse_session_start_ack(%{} = frame) do
+    with :ok <- check_type(frame, "session.start_ack"),
+         :ok <- check_api_version(frame),
+         session_id when is_binary(session_id) and session_id != "" <- frame["session_id"] do
+      {:ok, %{session_id: session_id}}
+    else
+      _ -> {:error, "invalid session.start_ack frame"}
+    end
+  end
+
+  def parse_session_start_ack(_), do: {:error, "not a session.start_ack frame"}
+
+  @doc """
   Parse a `session.input_ack` frame (bot → server). Returns
   `{:ok, %{session_id, last_received_seq}}` or `{:error, reason}`.
   """

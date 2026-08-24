@@ -295,6 +295,7 @@ defmodule LiliumChat.Import do
           [
             :interaction_id,
             :message_id,
+            :pin_id,
             :component_id,
             :custom_id,
             :actor_user_id,

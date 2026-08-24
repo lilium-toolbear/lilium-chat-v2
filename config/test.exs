@@ -35,6 +35,21 @@ config :lilium_chat, :s3,
 
 config :lilium_chat, :s3_transport, LiliumChat.S3.TestTransport
 
+# Housekeeping GC (issue #21): no periodic timer under test — the
+# background process would fight the SQL sandbox. Tests drive
+# `LiliumChat.Housekeeping.run_now/0` directly inside their own sandbox.
+config :lilium_chat, :housekeeping, enabled: false
+
+# /internal/debug/* gate (issue #21): a known test token; individual tests
+# override per-test via `Application.put_env` to exercise 403s.
+config :lilium_chat, :debug_token, "test-debug-token"
+
+# Sentry test mode (issue #21): starts the per-test registry + ownership
+# server used by `Sentry.Test` at boot. No DSN is configured, so
+# `LiliumChat.Observability.capture_exception/2` is a no-op unless a test
+# sets up its own collector via `Sentry.Test.setup_sentry/1`.
+config :sentry, test_mode: true
+
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
 config :lilium_chat, LiliumChatWeb.Endpoint,

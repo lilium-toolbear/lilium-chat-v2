@@ -1,0 +1,51 @@
+# Lilium Chat v2 — systemd unit (spec §2.3 / issue #21)
+#
+# Target: gina (single machine, spec D6). The release binary runs behind
+# the unchanged front proxy (Caddy/nginx) + Cloudflared tunnel
+# (chat.kuma.homes). This unit replaces the old Worker process on the box.
+#
+# Install:
+#   sudo install -m 644 deploy/lilium_chat.service /etc/systemd/system/
+#   sudo mkdir -p /etc/lilium-chat
+#   # /etc/lilium-chat/lilium_chat.env — 0600 root:lilium, see .env.example
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now lilium_chat
+#
+# Manual ops:
+#   systemctl status lilium_chat
+#   journalctl -u lilium_chat -f            # JSON logs (spec D18)
+#   curl -s localhost:4000/health | jq      # liveness + DB probe
+#   curl -s localhost:4000/metrics | head   # Prometheus scrape
+
+[Unit]
+Description=Lilium Chat v2 (Elixir/Phoenix chat backend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Dedicated service user; the release dir is owned by this user.
+User=lilium
+Group=lilium
+# Release root: _build/prod/rel/lilium_chat (see docs/ops/release-and-deploy.md).
+WorkingDirectory=/opt/lilium-chat-v2
+EnvironmentFile=/etc/lilium-chat/lilium_chat.env
+# bin/server sets PHX_SERVER=true (HTTP server on). The release binary
+# listens on PORT (default 4000); the front proxy forwards to it.
+ExecStart=/opt/lilium-chat-v2/bin/server
+Restart=always
+RestartSec=5
+# The BEAM spawns OS threads/processes; stop them all on shutdown.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+LimitNOFILE=65536
+# Hardening (single-machine deploy, no outbound services besides Sentry /
+# S3 / PG on the same host):
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

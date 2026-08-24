@@ -79,6 +79,13 @@ defmodule LiliumChatWeb.Endpoint do
     pass: ["*/*"],
     json_decoder: Phoenix.json_library()
 
+  # Sentry request context (spec §10 / A13, issue #21): url / method /
+  # headers / REQUEST_ID for every request, so events captured by
+  # LiliumChatWeb.ErrorHandler / ErrorJSON are searchable by request id.
+  # Placed after Plug.Parsers (body scrubbing) and before the Router; the
+  # context is process-local, so it survives into the controller rescue.
+  plug Sentry.PlugContext
+
   plug Plug.MethodOverride
   plug Plug.Head
   plug Plug.Session, @session_options

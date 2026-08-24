@@ -42,8 +42,9 @@ defmodule LiliumChatWeb.Telemetry do
 
   def metrics do
     [
-      # Phoenix endpoint / router (spec §10 key metrics: PG 事务 p99 etc. are
-      # covered by the repo distributions below)
+      # Phoenix endpoint / router (spec §10 key metrics such as PG 事务 p99
+      # are served by the PG statement distributions below — see the note
+      # above the `lilium_chat.repo.query.*` block)
       last_value("phoenix.endpoint.start.system_time", unit: {:native, :millisecond}),
       distribution(
         "phoenix.endpoint.stop.duration",
@@ -87,7 +88,15 @@ defmodule LiliumChatWeb.Telemetry do
         reporter_options: [buckets: duration_buckets()]
       ),
 
-      # Database (spec §10: PG 事务 p99)
+      # Database — PG statement time (spec §10 "PG 事务 p99"). Ecto 3.14
+      # emits exactly one telemetry event per query (`[:lilium_chat, :repo,
+      # :query]` — including the BEGIN/COMMIT statements of a transaction),
+      # so there is no transaction-level event to hook. The per-statement
+      # p99 (histogram_quantile over `lilium_chat_repo_query_*`) is the
+      # operational proxy for transaction latency: a transaction is only as
+      # slow as its slowest statement, and the statement-COUNT dimension of
+      # a transaction is covered separately by the
+      # `lilium_chat.request.query_count.*` metrics below.
       distribution(
         "lilium_chat.repo.query.total_time",
         unit: {:native, :millisecond},
@@ -137,6 +146,47 @@ defmodule LiliumChatWeb.Telemetry do
         tags: [:route],
         description:
           "Total PG write statements executed by HTTP requests (should stay 0 on read routes)"
+      ),
+
+      # Issue #21 — spec §10 key metrics (all fed by
+      # LiliumChat.Observability.runtime_gauges/0 + broadcast/3 +
+      # LiliumChat.Errors). Telemetry.Metrics convention: the last dotted
+      # segment of the metric name IS the measurement (e.g. "...count" reads
+      # the `:count` measurement), so each name ends in the emitted key.
+      # WS 连接数 (gauge per transport):
+      last_value("lilium_chat.websocket.connections.count",
+        tags: [:transport],
+        description: "Live WebSocket connections by transport"
+      ),
+      # per-topic 订阅数: total subscribers + distinct topics (gauges) and a
+      # histogram of subscribers-per-topic (bounded cardinality — no topic
+      # label, which would be unbounded).
+      last_value("lilium_chat.pubsub.subscribers.count",
+        description: "Total Phoenix.PubSub subscriptions"
+      ),
+      last_value("lilium_chat.pubsub.topics.count",
+        description: "Distinct Phoenix.PubSub topics with subscribers"
+      ),
+      distribution(
+        "lilium_chat.pubsub.subscribers_per_topic.count",
+        description: "Distribution of subscribers per PubSub topic",
+        reporter_options: [buckets: [1, 2, 5, 10, 25, 50, 100, 250]]
+      ),
+      # stream 活跃数 (gauge):
+      last_value("lilium_chat.streams.active.count",
+        description: "Active BotStream processes (Stream.<cid>#<mid>)"
+      ),
+      # PubSub 广播延迟 (distribution over the fanout broadcast call):
+      distribution(
+        "lilium_chat.pubsub.broadcast.stop.duration",
+        unit: {:native, :millisecond},
+        description: "Fanout PubSub broadcast latency (single-machine dispatch)",
+        reporter_options: [buckets: duration_buckets()]
+      ),
+      # idempotency 冲突率 (counter; emitted by LiliumChat.Errors.new/2 on
+      # IDEMPOTENCY_CONFLICT — the single funnel every conflict flows through):
+      sum("lilium_chat.idempotency.conflict.count",
+        description: "Total IDEMPOTENCY_CONFLICT errors constructed"
       )
     ]
   end
@@ -148,7 +198,10 @@ defmodule LiliumChatWeb.Telemetry do
     [
       # A module, function and arguments to be invoked periodically.
       # This function must call :telemetry.execute/3 and a metric must be added above.
-      {LiliumChat.Observability, :vm_stats, []}
+      {LiliumChat.Observability, :vm_stats, []},
+      # Spec §10 runtime gauges (issue #21): WS connections, PubSub
+      # subscribers, active streams — same 10s cadence.
+      {LiliumChat.Observability, :runtime_gauges, []}
     ]
   end
 

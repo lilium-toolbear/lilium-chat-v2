@@ -662,7 +662,8 @@ defmodule LiliumChat.Stream do
 
   defp broadcast_live(channel_id, frame) do
     topic = "channel:" <> channel_id
-    Phoenix.PubSub.broadcast(LiliumChat.PubSub, topic, {:broadcast, topic, frame})
+    # Timed wrapper (spec §10 PubSub 广播延迟, issue #21).
+    LiliumChat.Observability.broadcast(LiliumChat.PubSub, topic, {:broadcast, topic, frame})
   end
 
   defp cancel_timers(state) do

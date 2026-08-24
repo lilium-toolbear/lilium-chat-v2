@@ -303,7 +303,7 @@ defmodule LiliumChat.Uploads do
     """
 
     Repo.query!(sql, [
-      uuid_bin(Ids.uuidv7()),
+      Ids.uuid_bytes(Ids.uuidv7()),
       principal_id,
       operation,
       operation_id,
@@ -312,13 +312,6 @@ defmodule LiliumChat.Uploads do
       now,
       DateTime.add(now, @idempotency_ttl_seconds, :second)
     ])
-  end
-
-  # The idempotency `id` column is a Postgres `uuid`; an untyped `Repo.query!`
-  # only accepts a 16-byte binary for it (neither a uuid string nor a
-  # %Ecto.UUID{} — Postgrex DefaultTypes does not map Ecto.UUID).
-  defp uuid_bin(uuid_string) do
-    uuid_string |> String.downcase() |> String.replace("-", "") |> :binary.decode_hex()
   end
 
   # ------------------------------------------------------------- attachments

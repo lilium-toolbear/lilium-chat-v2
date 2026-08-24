@@ -71,4 +71,33 @@ defmodule LiliumChatWeb.MetricsTest do
     assert body =~ ~r/lilium_chat_request_query_count_reads_sum\{route="\/health"\} [1-9]\d*/
     assert body =~ ~r/lilium_chat_request_query_count_writes\{route="\/health"\} 0/
   end
+
+  test "issue #21 spec §10 catalog series are exposed" do
+    # Produce at least one sample per lazy series (the reporter only emits a
+    # series once its first event arrives), then drive the runtime gauges so
+    # the reporter has gauge samples (the poller runs on its own 10s cadence
+    # — tests can't wait for it).
+    :ok = Phoenix.PubSub.subscribe(LiliumChat.PubSub, "topic:catalog-test")
+    LiliumChat.Observability.broadcast(LiliumChat.PubSub, "topic:catalog-test", :payload)
+    _ = LiliumChat.Errors.new("IDEMPOTENCY_CONFLICT")
+    LiliumChat.Observability.runtime_gauges()
+
+    body = request(:get, "/metrics", []).resp_body
+
+    assert body =~ "# TYPE lilium_chat_websocket_connections_count gauge"
+    assert body =~ "# TYPE lilium_chat_pubsub_subscribers_count gauge"
+    assert body =~ "# TYPE lilium_chat_pubsub_topics_count gauge"
+    assert body =~ "# TYPE lilium_chat_pubsub_subscribers_per_topic_count histogram"
+    assert body =~ "# TYPE lilium_chat_streams_active_count gauge"
+    assert body =~ "# TYPE lilium_chat_pubsub_broadcast_stop_duration histogram"
+    assert body =~ "# TYPE lilium_chat_idempotency_conflict_count counter"
+  end
+
+  test "a real fanout broadcast produces a broadcast-duration sample" do
+    LiliumChat.Observability.broadcast(LiliumChat.PubSub, "topic:metrics-test", :payload)
+
+    body = request(:get, "/metrics", []).resp_body
+
+    assert body =~ ~r/lilium_chat_pubsub_broadcast_stop_duration_count \d+/
+  end
 end

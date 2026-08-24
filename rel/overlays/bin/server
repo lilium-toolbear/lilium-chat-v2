@@ -1,0 +1,13 @@
+#!/bin/sh
+# Release server launcher (mix phx.gen.release parity): the one command
+# that starts the HTTP server in a release, i.e. PHX_SERVER=true so
+# config/runtime.exs turns the Endpoint's :server option on.
+#
+# Install into the release via rel/overlays/ — it lands next to the
+# `lilium_chat` binary as `bin/server`, which the systemd unit execs
+# (see deploy/lilium_chat.service).
+set -e
+
+cd -P -- "$(dirname -- "$0")"
+
+PHX_SERVER=true exec ./lilium_chat start

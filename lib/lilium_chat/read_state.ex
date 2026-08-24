@@ -165,6 +165,11 @@ defmodule LiliumChat.ReadState do
     # BrowserChannel drops the frame when self() == sender_pid.
     frame = Frames.read_state_updated(channel_id, last_read_event_id, unread_count)
 
-    Phoenix.PubSub.broadcast(LiliumChat.PubSub, topic, {:broadcast_user, topic, frame, self()})
+    # Timed wrapper (spec §10 PubSub 广播延迟, issue #21).
+    LiliumChat.Observability.broadcast(
+      LiliumChat.PubSub,
+      topic,
+      {:broadcast_user, topic, frame, self()}
+    )
   end
 end

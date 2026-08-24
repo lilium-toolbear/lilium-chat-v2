@@ -20,6 +20,14 @@ if System.get_env("PHX_SERVER") do
   config :lilium_chat, LiliumChatWeb.Endpoint, server: true
 end
 
+# /internal/debug/* gate (spec §10 / issue #21): DEBUG_TOKEN parity with
+# the old Worker. Read in every env so dev boxes can use it too;
+# empty/unset ⇒ the debug surface is disabled. Not applied in test, where
+# config/test.exs owns the token (and per-test put_env overrides it).
+if config_env() != :test do
+  config :lilium_chat, :debug_token, System.get_env("DEBUG_TOKEN")
+end
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||
@@ -74,12 +82,26 @@ if config_env() == :prod do
     public_base: System.get_env("S3_PUBLIC_BASE") || System.get_env("S3_ENDPOINT"),
     presign_ttl_seconds: String.to_integer(System.get_env("PRESIGN_TTL_SECONDS") || "300")
 
-  # Sentry (spec §10) — same destination as the old Worker.
+  # Sentry (spec §10 / issue #21) — same destination as the old Worker
+  # (`sentry.kuma.homes/api/9/...`; the Elixir SDK sends events to the DSN
+  # store endpoint). Environment mirrors the old Worker's
+  # `SENTRY_ENVIRONMENT` var ("production").
   sentry_dsn = System.get_env("SENTRY_DSN")
 
   if sentry_dsn do
-    config :sentry, dsn: sentry_dsn, environment: :prod
+    config :sentry,
+      dsn: sentry_dsn,
+      environment_name: System.get_env("SENTRY_ENVIRONMENT") || "production"
   end
+
+  # Housekeeping GC knobs (spec §2.2 / issue #21): optional env overrides;
+  # the rest of the defaults live in config.exs.
+  config :lilium_chat, :housekeeping,
+    interval_ms: String.to_integer(System.get_env("HOUSEKEEPING_INTERVAL_MS") || "60000"),
+    pending_attachment_ttl_ms:
+      String.to_integer(System.get_env("HOUSEKEEPING_PENDING_ATTACHMENT_TTL_MS") || "600000"),
+    delivery_retention_ms:
+      String.to_integer(System.get_env("HOUSEKEEPING_DELIVERY_RETENTION_MS") || "60000")
 
   config :lilium_chat, LiliumChatWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],

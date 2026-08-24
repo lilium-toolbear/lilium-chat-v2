@@ -223,6 +223,19 @@ defmodule LiliumChat.Errors do
   def new(code, message \\ nil) when is_binary(code) do
     status = status_for(code)
 
+    # Issue #21 / spec §10: idempotency 冲突率. `Errors.new/2` is the single
+    # funnel every IDEMPOTENCY_CONFLICT flows through (user_command via
+    # LiliumChat.Idempotency.check, uploads, bot_effect and session_effect
+    # namespaces all raise/construct here), so the counter increments once
+    # per conflict construction without touching 4+ call sites. The count
+    # tracks conflicts (each conflict is raised once at the funnel; re-
+    # wrapping an already-constructed error does not re-count).
+    # telemetry_metrics_prometheus_core turns the event into a counter; with
+    # no handler attached the execute is a no-op.
+    if code == "IDEMPOTENCY_CONFLICT" do
+      :telemetry.execute([:lilium_chat, :idempotency, :conflict], %{count: 1}, %{})
+    end
+
     %ApiError{
       code: code,
       message: message || default_message(code),

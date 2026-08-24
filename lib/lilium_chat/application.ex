@@ -14,6 +14,9 @@ defmodule LiliumChat.Application do
 
     children = [
       LiliumChatWeb.Telemetry,
+      # Live WS connection counter (spec §10 / issue #21): monitors socket
+      # processes, decrements on disconnect.
+      LiliumChat.Observability.SocketTracker,
       LiliumChat.Repo,
       {DNSCluster, query: Application.get_env(:lilium_chat, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: LiliumChat.PubSub},
@@ -35,6 +38,9 @@ defmodule LiliumChat.Application do
       # owns seq/ack + finalize idempotency.
       {Registry, keys: :unique, name: LiliumChat.Streams.Registry},
       {DynamicSupervisor, name: LiliumChat.StreamConnections, strategy: :one_for_one},
+      # Periodic housekeeping GC (spec §2.2 / issue #21): idempotency,
+      # pending attachments, stream expiry, bot_deliveries cleanup.
+      LiliumChat.Housekeeping,
       # Start a worker by calling: LiliumChat.Worker.start_link(arg)
       # {LiliumChat.Worker, arg},
       # Start to serve requests, typically the last entry

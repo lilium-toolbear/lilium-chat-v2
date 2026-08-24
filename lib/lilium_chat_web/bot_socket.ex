@@ -48,6 +48,9 @@ defmodule LiliumChatWeb.BotSocket do
     with {:ok, token} <- extract_token(params, sec_headers),
          {:ok, identity} <- BotTokens.verify(token) do
       if @connect_scope in identity.scopes do
+        # Spec §10 WS 连接数 gauge (issue #21): SocketTracker monitors this
+        # process and decrements when it terminates.
+        LiliumChat.Observability.track_socket(:bot)
         {:ok, assign(socket, :bot_identity, identity)}
       else
         {:error, Errors.new("FORBIDDEN", "Missing scope: #{@connect_scope}")}

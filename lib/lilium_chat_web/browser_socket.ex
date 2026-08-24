@@ -37,6 +37,9 @@ defmodule LiliumChatWeb.BrowserSocket do
 
     with {:ok, token} <- extract_bearer_token(sec_headers),
          {:ok, identity} <- Auth.verify(token, jwt_secret()) do
+      # Spec §10 WS 连接数 gauge (issue #21): SocketTracker monitors this
+      # process and decrements when it terminates.
+      LiliumChat.Observability.track_socket(:browser)
       {:ok, assign(socket, :identity, identity)}
     else
       {:error, reason} ->

@@ -9,6 +9,7 @@ defmodule LiliumChat.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
+      releases: releases(),
       deps: deps()
     ]
   end
@@ -54,7 +55,24 @@ defmodule LiliumChat.MixProject do
       # own router (/metrics) instead of running a second HTTP listener.
       {:telemetry_metrics_prometheus_core, "~> 1.0"},
       # JSON structured logging (spec D18 / §10)
-      {:logger_json, "~> 7.0"}
+      {:logger_json, "~> 7.0"},
+      # Test-only: Sentry.Test (issue #21 Sentry tests) drives a local
+      # Bypass HTTP server to collect events instead of hitting the real
+      # Sentry destination.
+      {:bypass, "~> 2.0", only: [:test]}
+    ]
+  end
+
+  # Single self-contained release (spec §10 / D18): `bin/lilium_chat` is
+  # the one binary, `bin/server` (from rel/overlays/bin/server) is what
+  # systemd runs. Everything under rel/overlays/ is copied as-is into the
+  # release root, so no per-file overlay config is needed. See
+  # docs/ops/release-and-deploy.md.
+  def releases do
+    [
+      lilium_chat: [
+        include_executables_for: [:unix]
+      ]
     ]
   end
 

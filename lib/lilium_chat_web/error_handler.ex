@@ -36,7 +36,11 @@ defmodule LiliumChatWeb.ErrorHandler do
   @spec render_exception(Plug.Conn.t(), Exception.t()) :: Plug.Conn.t()
   def render_exception(conn, %Errors.ApiError{} = api_error), do: render(conn, api_error)
 
-  def render_exception(conn, _exception) do
+  def render_exception(conn, exception) do
+    # Spec §10 / A13 (issue #21): report the ORIGINAL exception to Sentry
+    # with the request id before degrading it to CHAT_WORKER_UNAVAILABLE.
+    # ApiErrors are contract business results (handled), never reported.
+    LiliumChat.Observability.capture_exception(exception, request_id_of(conn))
     render(conn, Errors.new("CHAT_WORKER_UNAVAILABLE"))
   end
 

@@ -33,6 +33,23 @@ defmodule LiliumChatWeb.Router do
   get "/health", LiliumChatWeb.HealthController, :show
   get "/metrics", LiliumChatWeb.MetricsController, :index
 
+  # Internal debug surface (spec §10, issue #21): old-Worker
+  # `/internal/debug/*` equivalents, gated by DEBUG_TOKEN (not the browser
+  # JWT — parity with the old Worker's assertDebugToken). Also outside the
+  # /api/chat/* contract scope.
+  pipeline :debug_api do
+    plug Plug.Parsers, parsers: [:json], pass: ["*/*"], json_decoder: Jason
+    plug LiliumChatWeb.DebugTokenPlug
+  end
+
+  scope "/internal/debug", LiliumChatWeb do
+    pipe_through :debug_api
+
+    get "/classes", DebugController, :classes
+    post "/sql", DebugController, :sql
+    post "/sql-all", DebugController, :sql_all
+  end
+
   # Contract routes under /api/chat/* (issue #2: common layer + tracer bullet).
   scope "/api/chat", LiliumChatWeb do
     pipe_through :browser_api

@@ -727,7 +727,8 @@ defmodule LiliumChat.Channel do
 
   defp broadcast(channel_id, frame) do
     topic = "channel:" <> channel_id
-    Phoenix.PubSub.broadcast(LiliumChat.PubSub, topic, {:broadcast, topic, frame})
+    # Timed wrapper (spec §10 PubSub 广播延迟, issue #21).
+    LiliumChat.Observability.broadcast(LiliumChat.PubSub, topic, {:broadcast, topic, frame})
   end
 
   # `my_channels_changed` (contract §10.5): after the lifecycle txn commits,
@@ -739,7 +740,7 @@ defmodule LiliumChat.Channel do
     Enum.each(hints, fn {user_id, reason} ->
       topic = "user:" <> user_id
       frame = Frames.user_event("my_channels_changed", reason, channel_id)
-      Phoenix.PubSub.broadcast(LiliumChat.PubSub, topic, {:broadcast, topic, frame})
+      LiliumChat.Observability.broadcast(LiliumChat.PubSub, topic, {:broadcast, topic, frame})
     end)
   end
 

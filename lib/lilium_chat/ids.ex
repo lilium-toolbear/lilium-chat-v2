@@ -78,6 +78,17 @@ defmodule LiliumChat.Ids do
   end
 
   @doc """
+  The 16-byte binary form of a UUID string, for Postgres `uuid` columns.
+
+  Untyped `Repo.query!` accepts only a 16-byte binary for a `uuid` column
+  (neither a UUID string nor `%Ecto.UUID{}` — Postgrex DefaultTypes does not
+  map `Ecto.UUID`).
+  """
+  def uuid_bytes(uuid) when is_binary(uuid) do
+    uuid |> String.downcase() |> String.replace("-", "") |> :binary.decode_hex()
+  end
+
+  @doc """
   Recover the `%{last_ms, counter}` sequence state from a stored monotonic
   event_id (crash recovery, spec §5.1) — used to seed the in-process counter
   from `MAX(chat_v2.events.event_id)` for a channel.

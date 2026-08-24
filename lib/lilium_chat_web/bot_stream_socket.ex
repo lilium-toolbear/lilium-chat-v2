@@ -23,6 +23,10 @@ defmodule LiliumChatWeb.BotStreamSocket do
          {:ok, identity} <- BotTokens.verify(token),
          :ok <- require_scopes(identity),
          {:ok, channel_id, message_id} <- path_ids(params) do
+      # Spec §10 WS 连接数 gauge (issue #21): SocketTracker monitors this
+      # process and decrements when it terminates.
+      LiliumChat.Observability.track_socket(:bot_stream)
+
       {:ok,
        socket
        |> assign(:bot_identity, identity)

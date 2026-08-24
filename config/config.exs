@@ -50,6 +50,21 @@ config :lilium_chat, :bot_stream,
   pending_flush_threshold_bytes: 8_192,
   fanout_max_pending_bytes: 4_096
 
+# Housekeeping GC (spec §2.2 / issue #21): cadence + per-task TTLs. Tests
+# set `enabled: false` and drive sweeps directly via
+# `LiliumChat.Housekeeping.run_now/0` inside the sandbox.
+#
+# The stream-expiry TTL is NOT set here: `expire_streams/0` derives it from
+# the live stream TTL (`:bot_stream` `ttl_seconds`) so the two cannot drift
+# apart. `stream_ttl_ms` remains a valid (optional) override key, e.g. for
+# tests.
+config :lilium_chat, :housekeeping,
+  enabled: true,
+  interval_ms: 60_000,
+  sweep_batch: 500,
+  pending_attachment_ttl_ms: 600_000,
+  delivery_retention_ms: 60_000
+
 # CORS / Origin whitelist — copied verbatim from the old repo
 # (lilium-chat/src/allowed-origins.ts, spec §6.3).
 config :lilium_chat, :cors,

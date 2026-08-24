@@ -30,6 +30,11 @@ defmodule LiliumChat.Application do
       # that owns the per-channel monotonic event_id counter + serial write.
       {Registry, keys: :unique, name: LiliumChat.Channels.Registry},
       {DynamicSupervisor, name: LiliumChat.ChannelConnections, strategy: :one_for_one},
+      # Per-stream processes (spec §2.2 / issue #18): registry + dynamic
+      # supervisor for the lazy-started `Stream.<cid>#<mid>` GenServer that
+      # owns seq/ack + finalize idempotency.
+      {Registry, keys: :unique, name: LiliumChat.Streams.Registry},
+      {DynamicSupervisor, name: LiliumChat.StreamConnections, strategy: :one_for_one},
       # Start a worker by calling: LiliumChat.Worker.start_link(arg)
       # {LiliumChat.Worker, arg},
       # Start to serve requests, typically the last entry

@@ -42,6 +42,14 @@ config :lilium_chat, :bot_gateway,
   message_event_ttl_ms: 30_000,
   stream_ttl_seconds: 300
 
+# Bot Stream WS cadence (contract §9.15 / old stream-constants.ts).
+config :lilium_chat, :bot_stream,
+  ttl_seconds: 300,
+  ack_flush_interval_ms: 250,
+  fanout_interval_ms: 100,
+  pending_flush_threshold_bytes: 8_192,
+  fanout_max_pending_bytes: 4_096
+
 # CORS / Origin whitelist — copied verbatim from the old repo
 # (lilium-chat/src/allowed-origins.ts, spec §6.3).
 config :lilium_chat, :cors,

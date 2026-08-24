@@ -328,7 +328,7 @@ defmodule LiliumChat.BotEffectsTest do
              BotEffects.apply(@channel, "other-bot", foreign)
   end
 
-  test "apply: start_stream inserts a streaming message and returns the stream handle" do
+  test "apply: start_stream returns the stream handle and does not insert a message" do
     channel = @channel
 
     assert {:applied, result} =
@@ -353,8 +353,8 @@ defmodule LiliumChat.BotEffectsTest do
     assert ws_url == "/api/chat/bot/channels/#{channel}/streams/#{message_id}/ws"
     assert {:ok, %DateTime{}, _} = DateTime.from_iso8601(expires_at)
 
-    # Minimal (#17) seam: a streaming placeholder row stands in for the
-    # streaming registry (the registry itself lands with #19).
+    # Contract §9.14: start_stream does not insert a canonical messages row
+    # (the Stream process is the in-memory registry; finalize/abandon write).
     rows =
       Query.rows(
         Repo.query(
@@ -364,7 +364,10 @@ defmodule LiliumChat.BotEffectsTest do
         )
       )
 
-    assert [%{"stream_state" => "streaming", "status" => "normal"}] = rows
+    assert rows == []
+
+    assert %{status: :streaming, bot_id: @bot} =
+             LiliumChat.Stream.debug_state(channel, message_id)
   end
 
   test "apply: pin effects validate ownership and persist the pin" do

@@ -27,6 +27,8 @@ defmodule LiliumChat.Projections do
     message.updated
     message.recalled
     message.deleted
+    message.stream_finalized
+    message.stream_abandoned
     interaction.completed
   )
 

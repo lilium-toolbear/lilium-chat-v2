@@ -29,7 +29,8 @@ defmodule LiliumChat.Channel do
     MessageMutate,
     MessageSend,
     Query,
-    Repo
+    Repo,
+    StreamWrite
   }
 
   alias LiliumChat.WebSockets.Frames
@@ -293,6 +294,30 @@ defmodule LiliumChat.Channel do
     GenServer.call(pid, {:open_dm, input}, 30_000)
   end
 
+  # ---------------------------------------------------------- stream (#18)
+
+  @doc """
+  Persist a stream finalize through the channel writer (contract §9.15.4).
+  `input` is the `StreamWrite.finalize/3` map. Returns `{:ok, response}`
+  (`%{message_id, event_id}`) or `{:error, %Errors.ApiError{}}`.
+  """
+  def finalize_stream(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:finalize_stream, input}, 30_000)
+  end
+
+  @doc """
+  Persist a non-empty stream abandon through the channel writer
+  (contract §9.15.5). Returns `{:ok, response}` or
+  `{:error, %Errors.ApiError{}}`.
+  """
+  def abandon_stream(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:abandon_stream, input}, 30_000)
+  end
+
   # --------------------------------------------------------- server callbacks
 
   @impl true
@@ -371,6 +396,14 @@ defmodule LiliumChat.Channel do
   def handle_call({:open_dm, input}, _from, state),
     do: run_command(state, fn -> Dms.open_dm(state.channel_id, state.seq, input) end)
 
+  @impl true
+  def handle_call({:finalize_stream, input}, _from, state),
+    do: run_command(state, fn -> StreamWrite.finalize(state.channel_id, state.seq, input) end)
+
+  @impl true
+  def handle_call({:abandon_stream, input}, _from, state),
+    do: run_command(state, fn -> StreamWrite.abandon(state.channel_id, state.seq, input) end)
+
   # Shared dispatch for every write command: run the domain op, rescue the
   # pre-txn business errors (all raises happen before the event_id is
   # allocated, so the held seq is unchanged), broadcast the committed event
@@ -408,6 +441,8 @@ defmodule LiliumChat.Channel do
   defp to_reply(%{kind: :invite_created, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :opened, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :cached, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :finalized, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :abandoned, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :error, error: api_error}), do: {:error, api_error}
 
   # `message.send` (issue #9) returns a single `event_frame`; the #10/#11

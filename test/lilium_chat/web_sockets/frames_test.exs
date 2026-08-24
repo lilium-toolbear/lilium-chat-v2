@@ -181,13 +181,17 @@ defmodule LiliumChat.WebSockets.FramesTest do
   # ------------------------------------------------------- stream_event
 
   test "stream_event frame for message.stream_started (§9.16)" do
-    frame = Frames.stream_event("message.stream_started", "ch-001", "msg-001", %{})
+    frame =
+      Frames.stream_event("message.stream_started", "ch-001", %{
+        "channel_id" => "ch-001",
+        "message_id" => "msg-001"
+      })
 
     assert frame["frame_type"] == "stream_event"
     assert frame["api_version"] == "lilium.chat.stream.v1"
-    assert frame["event"] == "message.stream_started"
+    assert frame["type"] == "message.stream_started"
     assert frame["channel_id"] == "ch-001"
-    assert frame["message_id"] == "msg-001"
+    assert frame["payload"]["message_id"] == "msg-001"
   end
 
   # ------------------------------------------------------ parse_command

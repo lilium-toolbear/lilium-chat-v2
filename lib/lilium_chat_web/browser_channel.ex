@@ -100,6 +100,14 @@ defmodule LiliumChatWeb.BrowserChannel do
     joined? = Map.get(socket, :joined, true) == true
 
     case frame do
+      # Live-only stream frames (contract §9.16): same channel topic, no
+      # event_id / membership_version cursor. Deliver when subscribed.
+      %{"frame_type" => "stream_event", "channel_id" => channel_id}
+      when live? and joined? and is_binary(channel_id) ->
+        if channel_id in subscribed do
+          push(socket, "stream_event", frame)
+        end
+
       # Channel event with membership gate
       %{"frame_type" => "event", "channel_id" => channel_id}
       when live? and joined? and is_binary(channel_id) ->

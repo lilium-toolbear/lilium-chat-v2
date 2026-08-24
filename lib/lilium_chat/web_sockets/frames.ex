@@ -147,19 +147,26 @@ defmodule LiliumChat.WebSockets.Frames do
   @doc """
   Build a `stream_event` frame (server → client, live-only stream frame).
 
-  Contract §9.16: `message.stream_started` / `message.stream_delta` /
-  `message.stream_abandon_cleanup` are live-only, not channel timeline events.
+  Contract §9.16 / wire `WireStreamEventFrame`: `type` is the live event
+  name; `payload` carries `channel_id` + `message_id` (+ `delta` for
+  stream_delta). Optional `stream_seq` / `occurred_at` via `opts`.
   """
-  def stream_event(event, channel_id, message_id, payload) do
-    %{
+  def stream_event(type, channel_id, payload, opts \\ []) when is_map(payload) do
+    frame = %{
       "frame_type" => "stream_event",
       "api_version" => @stream_api_version,
-      "event" => event,
       "channel_id" => channel_id,
-      "message_id" => message_id,
+      "type" => type,
       "payload" => payload
     }
+
+    frame
+    |> maybe_put("stream_seq", Keyword.get(opts, :stream_seq))
+    |> maybe_put("occurred_at", Keyword.get(opts, :occurred_at))
   end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   # ------------------------------------------------------------- helpers
 

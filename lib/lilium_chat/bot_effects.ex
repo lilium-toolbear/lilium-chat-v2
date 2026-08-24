@@ -18,7 +18,7 @@ defmodule LiliumChat.BotEffects do
   browser event emission) is the seam for issue #19.
   """
 
-  alias LiliumChat.{BotGateway, CanonicalJSON, Errors, Ids, Query, Repo}
+  alias LiliumChat.{BotGateway, CanonicalJSON, Errors, Ids, Query, Repo, Stream}
 
   # Idempotency rows expire after 24h (housekeeping GCs them, spec D10).
   @idem_ttl_ms 86_400_000
@@ -281,6 +281,7 @@ defmodule LiliumChat.BotEffects do
 
     case lookup(channel_id, bot_id, client_effect_id) do
       {:hit, %{"request_hash" => ^hash, "response_json" => response}} ->
+        maybe_rehydrate_stream(channel_id, bot_id, effect, response)
         {:cached, response}
 
       {:hit, _row} ->
@@ -392,30 +393,40 @@ defmodule LiliumChat.BotEffects do
   end
 
   defp applier_start_stream(channel_id, bot_id, effect) do
-    message = effect["message"]
+    # Contract §9.14: create the in-memory stream registry; do NOT insert a
+    # canonical messages row. The bot connects to Stream WS before expires_at.
+    message = effect["message"] || %{}
     message_id = Ids.uuidv7()
 
-    insert_bot_message(channel_id, bot_id, effect, message, "streaming", message_id)
-
-    # Contract §9.14: the ack MUST carry the stream handle. The streaming
-    # registry itself (DO-memory in the old Worker) is a #19 seam — here the
-    # bot connects to the Stream WS before `expires_at`; `expires_at` is a
-    # fresh 300s window (old Worker STREAM_DEFAULT_TTL_SECONDS).
-    expires_at = DateTime.add(DateTime.utc_now(), stream_ttl_seconds(), :second)
-
-    stream = %{
-      "channel_id" => channel_id,
-      "message_id" => message_id,
-      "ws_url" => "/api/chat/bot/channels/#{channel_id}/streams/#{message_id}/ws",
-      "expires_at" => DateTime.to_iso8601(expires_at)
-    }
+    {:ok, stream} = Stream.start_stream(channel_id, message_id, bot_id, message)
+    Stream.broadcast_started(channel_id, message_id)
 
     {:ok, effect_result(effect, %{"message_id" => message_id, "stream" => stream}), message_id}
   end
 
-  defp stream_ttl_seconds() do
-    Application.get_env(:lilium_chat, :bot_gateway, []) |> Keyword.get(:stream_ttl_seconds, 300)
+  # Idempotent start_stream replay: the Stream process is ephemeral, so a
+  # cached effect must revive it (same message_id / expires_at) or the
+  # bot's reconnect lands on BOT_STREAM_NOT_FOUND.
+  defp maybe_rehydrate_stream(channel_id, bot_id, %{"type" => "start_stream"} = effect, response) do
+    message_id = response["message_id"]
+    stream = response["stream"] || %{}
+
+    if is_binary(message_id) do
+      case Stream.owner(channel_id, message_id) do
+        {:ok, ^bot_id} ->
+          :ok
+
+        _ ->
+          meta = Map.put(effect["message"] || %{}, "expires_at", stream["expires_at"])
+          {:ok, _} = Stream.start_stream(channel_id, message_id, bot_id, meta)
+          :ok
+      end
+    else
+      :ok
+    end
   end
+
+  defp maybe_rehydrate_stream(_channel_id, _bot_id, _effect, _response), do: :ok
 
   defp insert_bot_message(channel_id, bot_id, effect, message, stream_state, message_id) do
     now = DateTime.utc_now()

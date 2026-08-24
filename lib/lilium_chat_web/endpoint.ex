@@ -35,6 +35,19 @@ defmodule LiliumChatWeb.Endpoint do
       error_handler: {LiliumChatWeb.BotSocket, :handle_connect_error, []}
     ]
 
+  # Bot Stream WS (contract §9.15, issue #18): one connection per stream.
+  # Path params land in Socket.connect/3 `params`. `path: ""` keeps the
+  # contract URL (no Phoenix `/websocket` suffix).
+  socket "/api/chat/bot/channels/:channel_id/streams/:message_id/ws",
+         LiliumChatWeb.BotStreamSocket,
+         websocket: [
+           path: "",
+           subprotocols: [LiliumChat.BotStream.api_version()],
+           check_origin: Application.compile_env(:lilium_chat, :cors, %{})[:origins] || [],
+           connect_info: [:sec_websocket_headers],
+           error_handler: {LiliumChatWeb.BotStreamSocket, :handle_connect_error, []}
+         ]
+
   # Serve at "/" the static files from "priv/static" directory.
   #
   # You should set gzip to true if you are running phx.digest

@@ -36,6 +36,14 @@ defmodule LiliumChat.BotGateway do
 
   @rejected_effect_types ["append_stream", "finalize_stream"]
 
+  # `session.effects` allowlist (old Worker `SESSION_GATEWAY_EFFECT_TYPES`):
+  # only channel-pin effects — see contract §9.7.3.
+  @session_gateway_effect_types ["set_channel_pin", "update_channel_pin", "clear_channel_pin"]
+
+  # The platform session-control Stop button custom_id (contract §9.12.2,
+  # old Worker `PLATFORM_STOP_SESSION_CUSTOM_ID`).
+  @platform_stop_session_custom_id "platform:stop_session"
+
   # ------------------------------------------------------------------ consts
 
   @doc "The Bot Gateway API version (WS subprotocol)."
@@ -53,6 +61,15 @@ defmodule LiliumChat.BotGateway do
 
   @doc "Effect types rejected on the main gateway (stateful-gateway only)."
   def rejected_effect_types(), do: @rejected_effect_types
+
+  @doc """
+  Effect types accepted on `session.effects` (contract §9.7.3): the three
+  channel-pin effect types only.
+  """
+  def session_gateway_effect_types(), do: @session_gateway_effect_types
+
+  @doc "The platform session-control Stop button custom_id."
+  def platform_stop_session_custom_id(), do: @platform_stop_session_custom_id
 
   # ------------------------------------------------------------------- hello
 
@@ -179,6 +196,132 @@ defmodule LiliumChat.BotGateway do
   def build_pong() do
     %{"type" => "pong", "api_version" => @api_version}
   end
+
+  # ------------------------------------------- stateful session frames (§9.7.4)
+
+  @doc """
+  Build a `session.stop_requested` frame (server → bot, contract §9.7.4).
+  Distinct from `session.input`: a control frame with **no** `seq`
+  (graceful-stop request; the Bot replies with `session.close`).
+  """
+  def build_session_stop_requested(session_id, reason, actor_user_id, grace_timeout_ms) do
+    %{
+      "type" => "session.stop_requested",
+      "api_version" => @api_version,
+      "session_id" => session_id,
+      "reason" => reason,
+      "actor_user_id" => actor_user_id,
+      "grace_timeout_ms" => grace_timeout_ms
+    }
+  end
+
+  @doc "Build a `session.closed` frame (server → bot, contract §9.7.4)."
+  def build_session_closed(session_id, status, reason) do
+    %{
+      "type" => "session.closed",
+      "api_version" => @api_version,
+      "session_id" => session_id,
+      "status" => status,
+      "reason" => reason
+    }
+  end
+
+  @doc """
+  Build a `session.input` frame (server → bot): one sequenced listen event
+  for an active stateful session (contract §9.9 / old Worker
+  `session.input`).
+  """
+  def build_session_input(session_id, channel_id, seq, event, message) do
+    %{
+      "type" => "session.input",
+      "api_version" => @api_version,
+      "session_id" => session_id,
+      "channel_id" => channel_id,
+      "seq" => seq,
+      "event" => event,
+      "message" => message
+    }
+  end
+
+  @doc """
+  Build a `session.effects_ack` frame (server → bot). `status` is
+  `"applied"` (with `effect_results`) or `"rejected"` (with
+  `error: %{code, message}`).
+  """
+  def build_session_effects_ack(session_id, effect_seq, "applied", %{"effect_results" => results})
+      when is_list(results) do
+    %{
+      "type" => "session.effects_ack",
+      "api_version" => @api_version,
+      "session_id" => session_id,
+      "effect_seq" => effect_seq,
+      "status" => "applied",
+      "effect_results" => results
+    }
+  end
+
+  def build_session_effects_ack(session_id, effect_seq, "rejected", %{"error" => error})
+      when is_map(error) do
+    %{
+      "type" => "session.effects_ack",
+      "api_version" => @api_version,
+      "session_id" => session_id,
+      "effect_seq" => effect_seq,
+      "status" => "rejected",
+      "error" => %{
+        "code" => error["code"] || "BOT_EFFECT_INVALID",
+        "message" => error["message"] || "effect failed"
+      }
+    }
+  end
+
+  @doc """
+  Parse a `session.input_ack` frame (bot → server). Returns
+  `{:ok, %{session_id, last_received_seq}}` or `{:error, reason}`.
+  """
+  def parse_session_input_ack(%{} = frame) do
+    with :ok <- check_type(frame, "session.input_ack"),
+         :ok <- check_api_version(frame),
+         session_id when is_binary(session_id) and session_id != "" <- frame["session_id"],
+         seq when is_number(seq) <- frame["last_received_seq"] do
+      {:ok, %{session_id: session_id, last_received_seq: trunc(seq)}}
+    end
+  end
+
+  def parse_session_input_ack(_), do: {:error, "not a session.input_ack frame"}
+
+  @doc """
+  Parse a `session.close` frame (bot → server, contract §9.7.4). `reason` is
+  optional (defaults to `bot_closed` at the handler).
+  """
+  def parse_session_close(%{} = frame) do
+    with :ok <- check_type(frame, "session.close"),
+         :ok <- check_api_version(frame),
+         session_id when is_binary(session_id) and session_id != "" <- frame["session_id"] do
+      reason = frame["reason"]
+      {:ok, %{session_id: session_id, reason: if(is_binary(reason), do: reason, else: nil)}}
+    end
+  end
+
+  def parse_session_close(_), do: {:error, "not a session.close frame"}
+
+  @doc """
+  Parse a `session.effects` frame (bot → server, contract §9.7.3). Returns
+  `{:ok, %{session_id, effect_seq, effects}}` or `{:error, reason}`.
+  Per-effect validation (pin allowlist, idempotency) happens in
+  `LiliumChat.StatefulSessions`.
+  """
+  def parse_session_effects(%{} = frame) do
+    with :ok <- check_type(frame, "session.effects"),
+         :ok <- check_api_version(frame),
+         session_id when is_binary(session_id) and session_id != "" <- frame["session_id"],
+         seq when is_integer(seq) and seq >= 1 <- frame["effect_seq"],
+         effects when is_list(effects) <- frame["effects"] do
+      {:ok, %{session_id: session_id, effect_seq: seq, effects: effects}}
+    end
+  end
+
+  def parse_session_effects(_), do: {:error, "not a session.effects frame"}
 
   # -------------------------------------------------------------- internals
 

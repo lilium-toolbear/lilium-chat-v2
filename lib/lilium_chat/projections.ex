@@ -79,7 +79,7 @@ defmodule LiliumChat.Projections do
       "message_id" => row["message_id"],
       "command_id" => row["command_id"],
       "channel_id" => row["channel_id"],
-      "sender" => project_sender(row, profiles),
+      "sender" => project_sender(row, profiles, extras),
       "type" => row["type"],
       "format" => row["format"] || "plain",
       "status" => row["status"],
@@ -108,8 +108,13 @@ defmodule LiliumChat.Projections do
     }
   end
 
-  @doc "Project a message sender (user with resolved profile, or bot fallback)."
-  def project_sender(row, profiles) do
+  @doc """
+  Project a message sender (user with resolved profile, or bot fallback).
+  `extras[:bot_summary]` (`%{"display_name" => ..., "avatar_url" => ...}`)
+  carries the bot summary for live effect payloads (issue #19); the
+  read path resolves bot summaries from `bot_apps` (Timeline).
+  """
+  def project_sender(row, profiles, extras \\ %{}) do
     case row["sender_kind"] do
       "user" ->
         %{
@@ -119,13 +124,14 @@ defmodule LiliumChat.Projections do
 
       "bot" ->
         bot_id = row["sender_bot_id"]
+        summary = Map.get(extras, :bot_summary)
 
         %{
           "kind" => "bot",
           "bot" => %{
             "bot_id" => bot_id,
-            "display_name" => bot_id,
-            "avatar_url" => nil
+            "display_name" => (summary && summary["display_name"]) || bot_id,
+            "avatar_url" => summary && summary["avatar_url"]
           }
         }
 
@@ -241,6 +247,20 @@ defmodule LiliumChat.Projections do
   end
 
   def json_map(_other), do: nil
+
+  @doc "Coerce a JSONB column into a list (decoded lists pass through; JSON-array strings are decoded; anything else → `[]`)."
+  def json_list(nil), do: []
+
+  def json_list(value) when is_list(value), do: value
+
+  def json_list(value) when is_binary(value) do
+    case Jason.decode(value) do
+      {:ok, list} when is_list(list) -> list
+      _ -> []
+    end
+  end
+
+  def json_list(_other), do: []
 
   @doc "Format a timestamp column (DateTime / NaiveDateTime / ISO string / nil)."
   def format_ts(nil), do: nil

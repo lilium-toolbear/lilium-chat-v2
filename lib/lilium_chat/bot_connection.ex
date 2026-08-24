@@ -25,7 +25,7 @@ defmodule LiliumChat.BotConnection do
 
   require Logger
 
-  alias LiliumChat.{BotDelivery, BotGateway, Ids}
+  alias LiliumChat.{BotDelivery, BotGateway, Channel, Ids, StatefulSessions}
 
   # ------------------------------------------------------------- lifecycle
 
@@ -149,6 +149,88 @@ defmodule LiliumChat.BotConnection do
     end
   end
 
+  @doc """
+  Best-effort live push (issue #19): `session.input` / `session.stop_requested`
+  / `session.closed` frames. Cast-based — safe to call while the bot process
+  is busy inside the same call chain (no `call`-to-self deadlock); a bot
+  that is offline or mid-apply simply misses the frame (durable state is
+  in PG; old Worker fanout parity).
+  """
+  def push_nowait(bot_id, frame) do
+    case pid_for(bot_id) do
+      nil ->
+        :offline
+
+      pid ->
+        try do
+          GenServer.cast(pid, {:push_frame_nowait, frame})
+          :ok
+        catch
+          :exit, _ -> :offline
+        end
+    end
+  end
+
+  # ---------------------------------------------------- stateful sessions (#19)
+
+  @doc """
+  Route a `session.effects` frame (contract §9.7.3) through the bot
+  process. `parsed` is the `BotGateway.parse_session_effects/1` result.
+  Returns the `session.effects_ack` frame.
+  """
+  def deliver_session_effects(bot_id, %{
+        session_id: session_id,
+        effect_seq: effect_seq,
+        effects: effects
+      }) do
+    case pid_for(bot_id) do
+      nil ->
+        rejected_effects_ack(session_id, effect_seq, "BOT_NOT_FOUND", "bot not connected")
+
+      pid ->
+        try do
+          GenServer.call(pid, {:deliver_session_effects, session_id, effect_seq, effects}, 30_000)
+        catch
+          :exit, _ ->
+            rejected_effects_ack(
+              session_id,
+              effect_seq,
+              "CHAT_WORKER_UNAVAILABLE",
+              "worker unavailable"
+            )
+        end
+    end
+  end
+
+  @doc """
+  Route a `session.close` frame (contract §9.7.4) through the bot process.
+  `reason` may be nil (defaults to `bot_closed`). Fire-and-forget: the bot
+  is told the outcome via the `session.closed` frame the close emits.
+  """
+  def deliver_session_close(bot_id, session_id, reason \\ nil) do
+    if pid = pid_for(bot_id) do
+      try do
+        GenServer.call(pid, {:deliver_session_close, session_id, reason}, 30_000)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+  end
+
+  @doc """
+  Route a `session.input_ack` frame (contract §9.7.4) through the bot
+  process. `parsed` is the `BotGateway.parse_session_input_ack/1` result.
+  """
+  def deliver_session_input_ack(bot_id, %{session_id: session_id, last_received_seq: seq}) do
+    if pid = pid_for(bot_id) do
+      try do
+        GenServer.call(pid, {:deliver_session_input_ack, session_id, seq}, 30_000)
+      catch
+        :exit, _ -> :ok
+      end
+    end
+  end
+
   # --------------------------------------------------------------- detach
 
   @doc """
@@ -197,8 +279,13 @@ defmodule LiliumChat.BotConnection do
     session_id = Ids.uuidv7()
 
     # `resume_frames/1` accounts the redelivery as an attempt (and enforces
-    # `max_attempts`) while building the frames.
-    frames = BotDelivery.resume_frames(state.bot_id)
+    # `max_attempts`) while building the frames. Unacked `session.input`
+    # rows follow (old Worker `resumeStatefulSessions` +
+    # `statefulSessionInputs`: `pending`/`sent`, `seq > last_acked`, in
+    # session start order) — the bot dedupes on `(session_id, seq)`.
+    frames =
+      BotDelivery.resume_frames(state.bot_id) ++
+        StatefulSessions.resume_input_frames(state.bot_id)
 
     state =
       state
@@ -224,6 +311,75 @@ defmodule LiliumChat.BotConnection do
     {:reply, ack, state |> schedule_lease()}
   end
 
+  def handle_call(
+        {:deliver_session_effects, session_id, effect_seq, effects},
+        _from,
+        state
+      ) do
+    ack =
+      case StatefulSessions.get(session_id) do
+        nil ->
+          rejected_effects_ack(
+            session_id,
+            effect_seq,
+            "STATEFUL_SESSION_NOT_FOUND",
+            "session not found"
+          )
+
+        session ->
+          case Channel.session_effects(session["channel_id"], %{
+                 bot_id: state.bot_id,
+                 session_id: session_id,
+                 effect_seq: effect_seq,
+                 effects: effects
+               }) do
+            {:ok, ack_frame} ->
+              ack_frame
+
+            {:error, api_error} ->
+              rejected_effects_ack(
+                session_id,
+                effect_seq,
+                api_error.code,
+                api_error.message
+              )
+          end
+      end
+
+    {:reply, ack, state |> schedule_lease()}
+  end
+
+  def handle_call({:deliver_session_close, session_id, reason}, _from, state) do
+    case StatefulSessions.get(session_id) do
+      %{"channel_id" => channel_id} ->
+        Channel.session_close(channel_id, %{
+          bot_id: state.bot_id,
+          session_id: session_id,
+          reason: reason
+        })
+
+      _ ->
+        :ok
+    end
+
+    {:reply, %{"status" => "ok"}, state |> schedule_lease()}
+  end
+
+  def handle_call({:deliver_session_input_ack, session_id, last_received_seq}, _from, state) do
+    case StatefulSessions.get(session_id) do
+      %{"channel_id" => channel_id} ->
+        Channel.session_input_ack(channel_id, %{
+          session_id: session_id,
+          last_received_seq: last_received_seq
+        })
+
+      _ ->
+        :ok
+    end
+
+    {:reply, %{"status" => "ok"}, state |> schedule_lease()}
+  end
+
   def handle_call({:push_frame, frame}, _from, state) do
     if state.channel_pid == nil do
       {:reply, :offline, state}
@@ -236,6 +392,15 @@ defmodule LiliumChat.BotConnection do
   @impl true
   def handle_cast(:touch, state) do
     {:noreply, state |> schedule_lease()}
+  end
+
+  def handle_cast({:push_frame_nowait, frame}, state) do
+    if state.channel_pid == nil do
+      {:noreply, state}
+    else
+      push(state.channel_pid, frame)
+      {:noreply, state}
+    end
   end
 
   def handle_cast({:detach, reason, session_id}, state) do
@@ -310,6 +475,12 @@ defmodule LiliumChat.BotConnection do
     ref = Process.send_after(self(), :lease_expired, config(:lease_ttl_ms, 60_000))
 
     Map.put(state, :lease_ref, ref)
+  end
+
+  defp rejected_effects_ack(session_id, effect_seq, code, message) do
+    BotGateway.build_session_effects_ack(session_id, effect_seq, "rejected", %{
+      "error" => %{"code" => code, "message" => message}
+    })
   end
 
   defp push(channel_pid, frame) do

@@ -18,6 +18,8 @@ defmodule LiliumChat.Channel do
   use GenServer
 
   alias LiliumChat.{
+    BotConnection,
+    BotEffects,
     ChannelJoin,
     ChannelLifecycle,
     ChannelPins,
@@ -30,6 +32,7 @@ defmodule LiliumChat.Channel do
     MessageSend,
     Query,
     Repo,
+    StatefulSessions,
     StreamWrite
   }
 
@@ -318,6 +321,84 @@ defmodule LiliumChat.Channel do
     GenServer.call(pid, {:abandon_stream, input}, 30_000)
   end
 
+  # ------------------------------------------------- bot effects (#17 → #19)
+
+  @doc """
+  Apply a `delivery_result` effect batch through the channel writer
+  (contract §9.14, issue #19 — old Worker `applyBotEffects` parity).
+  `input` is `%{bot_id: binary, effects: list, is_official: bool,
+  allow_session_control: bool, session_id: binary | nil}`.
+
+  Returns `{:ok, %{effect_results, event_frames}}` or
+  `{:error, %Errors.ApiError{}}`.
+  """
+  def apply_bot_effects(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:apply_bot_effects, input}, 30_000)
+  end
+
+  # --------------------------------------------------- stateful sessions (#19)
+
+  @doc """
+  Handle a bot `session.effects` frame (contract §9.7.3). `input`:
+  `%{bot_id, session_id, effect_seq, effects}`. Returns `{:ok, ack_frame}`
+  (a `session.effects_ack` frame) or `{:error, %Errors.ApiError{}}`.
+  """
+  def session_effects(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:session_effects, input}, 30_000)
+  end
+
+  @doc """
+  Handle a bot `session.close` frame (contract §9.7.4). `input`:
+  `%{bot_id, session_id, reason}`. Returns `{:ok, %{}}` or
+  `{:error, %Errors.ApiError{}}`.
+  """
+  def session_close(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:session_close, input}, 30_000)
+  end
+
+  @doc """
+  Handle a bot `session.input_ack` frame (contract §9.7.4). `input`:
+  `%{session_id, last_received_seq}`. Returns `{:ok, %{}}` or
+  `{:error, %Errors.ApiError{}}`.
+  """
+  def session_input_ack(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:session_input_ack, input}, 30_000)
+  end
+
+  @doc """
+  The `platform:stop_session` platform shortcut (contract §9.12.2,
+  issue #19 acceptance A5). `input`: `%{pin_id, user_id, admin}` —
+  the caller has already resolved owner/admin. Returns
+  `{:ok, committed_ack_payload}` (the `command_ack` payload the interaction
+  handler wraps) or `{:error, %Errors.ApiError{}}`.
+  """
+  def request_stop(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:request_stop, input}, 30_000)
+  end
+
+  @doc """
+  Browser `interaction.submit` (contract §9.5, brief §5/§10). `input`:
+  `%{user_id, command_id, payload}` — payload carries `message_id` XOR
+  `pin_id` + `component_id` + `custom_id` + `value`. Returns
+  `{:ok, ack_payload}` (the `interaction.submit` response) or
+  `{:error, %Errors.ApiError{}}`.
+  """
+  def submit_interaction(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:submit_interaction, input}, 30_000)
+  end
+
   # --------------------------------------------------------- server callbacks
 
   @impl true
@@ -325,9 +406,12 @@ defmodule LiliumChat.Channel do
     # Recover the monotonic counter from the newest committed event (crash
     # recovery, spec §5.1). An empty channel seeds the counter at 0.
     seq = recover_seq(channel_id)
+    state = %{channel_id: channel_id, seq: seq}
+
+    rearm_session_timers(state)
 
     Logger.debug("channel writer started: #{channel_id}")
-    {:ok, %{channel_id: channel_id, seq: seq}}
+    {:ok, state}
   end
 
   @impl true
@@ -404,12 +488,100 @@ defmodule LiliumChat.Channel do
   def handle_call({:abandon_stream, input}, _from, state),
     do: run_command(state, fn -> StreamWrite.abandon(state.channel_id, state.seq, input) end)
 
+  @impl true
+  def handle_call({:apply_bot_effects, input}, _from, state) do
+    run_command(state, fn ->
+      case BotEffects.apply_effects(
+             state.channel_id,
+             state.seq,
+             input[:bot_id],
+             input[:effects] || [],
+             is_official: input[:is_official] || false,
+             allow_session_control: input[:allow_session_control] || false,
+             session_id: input[:session_id]
+           ) do
+        {result, new_seq} -> {Map.put(result, :kind, :applied), new_seq}
+      end
+    end)
+  end
+
+  @impl true
+  def handle_call({:session_effects, input}, _from, state),
+    do:
+      run_command(state, fn ->
+        StatefulSessions.handle_session_effects(state.channel_id, state.seq, %{
+          bot_id: input[:bot_id],
+          session_id: input[:session_id],
+          effect_seq: input[:effect_seq],
+          effects: input[:effects] || []
+        })
+      end)
+
+  @impl true
+  def handle_call({:session_close, input}, _from, state),
+    do:
+      run_command(state, fn ->
+        StatefulSessions.handle_session_close(state.channel_id, state.seq, %{
+          bot_id: input[:bot_id],
+          session_id: input[:session_id],
+          reason: input[:reason]
+        })
+      end)
+
+  @impl true
+  def handle_call({:session_input_ack, input}, _from, state) do
+    run_command(state, fn ->
+      case StatefulSessions.handle_input_ack(state.channel_id, %{
+             session_id: input[:session_id],
+             last_received_seq: input[:last_received_seq]
+           }) do
+        {:ok, session} -> {%{kind: :input_acked, session_id: session["session_id"]}, state.seq}
+      end
+    end)
+  end
+
+  @impl true
+  def handle_call({:request_stop, input}, _from, state),
+    do:
+      run_command(state, fn ->
+        StatefulSessions.request_stop(state.channel_id, state.seq, %{
+          pin_id: input[:pin_id],
+          user_id: input[:user_id],
+          admin: input[:admin] || false
+        })
+      end)
+
+  @impl true
+  def handle_call({:submit_interaction, input}, _from, state),
+    do:
+      run_command(state, fn ->
+        StatefulSessions.submit_interaction(state.channel_id, state.seq, %{
+          user_id: input[:user_id],
+          command_id: input[:command_id],
+          payload: input[:payload] || %{}
+        })
+      end)
+
   # Shared dispatch for every write command: run the domain op, rescue the
   # pre-txn business errors (all raises happen before the event_id is
   # allocated, so the held seq is unchanged), broadcast the committed event
   # frames (in event_id order) + the user-scoped `my_channels_changed` hints,
   # and reply with the ack / response.
   defp run_command(state, fun) do
+    {result, _new_seq, state_after} = execute(state, fun)
+
+    {:reply, to_reply(result), state_after}
+  end
+
+  # The `handle_info` variant (stop-grace / expiry timers): no caller to
+  # reply to.
+  defp run_command_info(state, fun) do
+    {_result, _new_seq, state_after} = execute(state, fun)
+
+    {:noreply, state_after}
+  end
+
+  defp execute(state, fun) do
     {result, new_seq} =
       try do
         fun.()
@@ -420,8 +592,10 @@ defmodule LiliumChat.Channel do
 
     broadcast_frames(state.channel_id, result)
     broadcast_user_hints(state.channel_id, result)
+    push_session_frames(result)
+    arm_timers(result)
 
-    {:reply, to_reply(result), %{state | seq: new_seq}}
+    {result, new_seq, Map.put(state, :seq, new_seq)}
   end
 
   # --------------------------------------------------------------- internals
@@ -443,17 +617,26 @@ defmodule LiliumChat.Channel do
   defp to_reply(%{kind: :cached, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :finalized, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :abandoned, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :applied, effect_results: results}), do: {:ok, %{effect_results: results}}
+  defp to_reply(%{kind: :session_effects, reply: reply}), do: {:ok, reply}
+  defp to_reply(%{kind: :session_closed}), do: {:ok, %{}}
+  defp to_reply(%{kind: :input_acked}), do: {:ok, %{}}
+  defp to_reply(%{kind: :stopped, reply: reply}), do: {:ok, reply}
+  defp to_reply(%{kind: :interaction_submitted, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :closed}), do: {:ok, %{}}
   defp to_reply(%{kind: :error, error: api_error}), do: {:error, api_error}
 
   # `message.send` (issue #9) returns a single `event_frame`; the #10/#11
-  # write paths return `event_frames` (a list, in event_id order).
-  defp broadcast_frames(channel_id, %{event_frame: frame}), do: broadcast(channel_id, frame)
+  # write paths return `event_frames` (a list, in event_id order). Both may
+  # appear (a commit frame followed by post-commit close frames) — broadcast
+  # in event_id order: the commit frame first.
+  defp broadcast_frames(channel_id, result) do
+    frames =
+      if(result[:event_frame], do: [result[:event_frame]], else: []) ++
+        List.wrap(result[:event_frames])
 
-  defp broadcast_frames(channel_id, %{event_frames: frames})
-       when is_list(frames) and frames != [],
-       do: Enum.each(frames, fn frame -> broadcast(channel_id, frame) end)
-
-  defp broadcast_frames(_channel_id, _result), do: :ok
+    Enum.each(frames, fn frame -> broadcast(channel_id, frame) end)
+  end
 
   defp broadcast(channel_id, frame) do
     topic = "channel:" <> channel_id
@@ -474,6 +657,107 @@ defmodule LiliumChat.Channel do
   end
 
   defp broadcast_user_hints(_channel_id, _result), do: :ok
+
+  # Bot-scoped live frames (session.stop_requested / session.input /
+  # session.closed): best-effort push through the Bot process — the durable
+  # state lives in PG, the live push is fanout (old Worker parity).
+  defp push_session_frames(%{push_frames: frames, push_bot_id: bot_id})
+       when is_list(frames) and frames != [] and is_binary(bot_id) do
+    Enum.each(frames, fn frame -> BotConnection.push_nowait(bot_id, frame) end)
+  end
+
+  defp push_session_frames(_result), do: :ok
+
+  # Stop-grace timer (contract §9.12.2): force-close a `closing` session
+  # that did not close within `grace_timeout_ms`.
+  defp arm_timers(%{arm_grace: %{session_id: session_id, at: at}}) do
+    Process.send_after(self(), {:session_stop_grace, session_id}, until_ms(at))
+    :ok
+  end
+
+  defp arm_timers(_result), do: :ok
+
+  # (Re)arm the session timers from durable state (writer (re)start,
+  # old Worker alarm parity): `closing` sessions re-arm their stop grace;
+  # `starting` / `active` / `suspended` sessions re-arm the TTL expiry.
+  defp rearm_session_timers(state) do
+    now_ms = DateTime.to_unix(DateTime.utc_now(), :millisecond)
+
+    Enum.each(StatefulSessions.active_rows(state.channel_id), fn row ->
+      session_id = row["session_id"]
+
+      cond do
+        row["status"] == "closing" and row["stop_grace_at"] != nil ->
+          Process.send_after(
+            self(),
+            {:session_stop_grace, session_id},
+            max(to_unix_ms(row["stop_grace_at"]) - now_ms, 0)
+          )
+
+        row["expires_at"] != nil ->
+          Process.send_after(
+            self(),
+            {:session_expiry, session_id},
+            max(to_unix_ms(row["expires_at"]) - now_ms, 0)
+          )
+
+        true ->
+          :ok
+      end
+    end)
+
+    :ok
+  end
+
+  # Raw `Repo.query` decodes `timestamptz` differently depending on the query
+  # shape (parameterized results may arrive as NaiveDateTime). Accept both.
+  defp to_unix_ms(%DateTime{} = value), do: DateTime.to_unix(value, :millisecond)
+
+  defp to_unix_ms(%NaiveDateTime{} = value),
+    do: value |> DateTime.from_naive!("Etc/UTC") |> DateTime.to_unix(:millisecond)
+
+  defp until_ms(at) do
+    now_ms = DateTime.to_unix(DateTime.utc_now(), :millisecond)
+    max(DateTime.to_unix(at, :millisecond) - now_ms, 0)
+  end
+
+  # Timer handlers run in the `handle_info` context (no GenServer caller).
+
+  @impl true
+  def handle_info({:session_stop_grace, session_id}, state) do
+    case StatefulSessions.get(session_id) do
+      %{"status" => "closing", "channel_id" => channel_id} ->
+        if channel_id == state.channel_id do
+          run_command_info(state, fn ->
+            StatefulSessions.close(state.channel_id, state.seq, session_id, "stop_timeout")
+          end)
+        else
+          {:noreply, state}
+        end
+
+      _ ->
+        # Already closed / bot-closed first — the timer is stale.
+        {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_info({:session_expiry, session_id}, state) do
+    case StatefulSessions.get(session_id) do
+      %{"status" => status, "channel_id" => channel_id} ->
+        if channel_id == state.channel_id and status in StatefulSessions.active_statuses() do
+          run_command_info(state, fn ->
+            # TTL elapsed → reason `timeout` (old Worker: status `failed`).
+            StatefulSessions.close(state.channel_id, state.seq, session_id, "timeout")
+          end)
+        else
+          {:noreply, state}
+        end
+
+      _ ->
+        {:noreply, state}
+    end
+  end
 
   defp recover_seq(channel_id) do
     case Query.rows(

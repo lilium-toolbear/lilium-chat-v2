@@ -7,7 +7,7 @@ defmodule LiliumChat.BotEffectsTest do
 
   import LiliumChatWeb.BotFixtures
 
-  alias LiliumChat.{BotEffects, Query, Repo}
+  alias LiliumChat.{BotEffects, Ids, Projections, Query, Repo}
 
   @channel "ch-eff-0001"
   @bot "bot-eff-0001"
@@ -371,12 +371,16 @@ defmodule LiliumChat.BotEffectsTest do
   end
 
   test "apply: pin effects validate ownership and persist the pin" do
+    # Contract §3.10.2: `PinMessageDraft` requires `format` AND
+    # `components: MessageComponent[]` (the old Worker
+    # `parsePinMessageDraft` rejects a missing/unknown format or a missing
+    # components array).
     assert {:applied, %{"pin_id" => pin_id}} =
              BotEffects.apply(@channel, @bot, %{
                "type" => "set_channel_pin",
                "client_effect_id" => "pin-1",
                "pin_kind" => "announcement",
-               "message" => %{"text" => "pinned!"}
+               "message" => %{"format" => "plain", "text" => "pinned!", "components" => []}
              })
 
     assert is_binary(pin_id)
@@ -432,4 +436,372 @@ defmodule LiliumChat.BotEffectsTest do
                "pin_id" => pin_id
              })
   end
+
+  # ------------------------------------------------- update_message (#19)
+
+  test "apply: update_message text edit flips status normal→edited and sets edited_at" do
+    {:applied, %{"message_id" => message_id}} =
+      BotEffects.apply(@channel, @bot, %{
+        "type" => "send_message",
+        "client_effect_id" => "seed-edit",
+        "message" => %{"type" => "text", "text" => "original"}
+      })
+
+    assert {:applied, %{"message_id" => ^message_id, "event_id" => event_id}} =
+             BotEffects.apply(@channel, @bot, %{
+               "type" => "update_message",
+               "client_effect_id" => "up-edit",
+               "message_id" => message_id,
+               "message" => %{"text" => "edited text"}
+             })
+
+    assert is_binary(event_id)
+
+    [
+      %{"status" => "edited", "edited_at" => edited_at, "text" => "edited text"}
+    ] =
+      Query.rows(
+        Repo.query(
+          "SELECT status, edited_at, text FROM chat_v2.messages WHERE message_id = $1",
+          [message_id],
+          type: true
+        )
+      )
+
+    assert timestamp?(edited_at)
+
+    assert event_count(@channel, "message.updated") == 1
+
+    # idempotent replay
+    assert {:cached, %{"message_id" => ^message_id}} =
+             BotEffects.apply(@channel, @bot, %{
+               "type" => "update_message",
+               "client_effect_id" => "up-edit",
+               "message_id" => message_id,
+               "message" => %{"text" => "edited text"}
+             })
+  end
+
+  test "apply: update_message relinks attachments (image) and clears them back to text" do
+    seed_bot_attachment("att-1")
+    seed_bot_attachment("att-2")
+
+    {:applied, %{"message_id" => message_id}} =
+      BotEffects.apply(@channel, @bot, %{
+        "type" => "send_message",
+        "client_effect_id" => "seed-att",
+        "message" => %{"type" => "text", "text" => "base"}
+      })
+
+    assert {:applied, _} =
+             BotEffects.apply(@channel, @bot, %{
+               "type" => "update_message",
+               "client_effect_id" => "up-att",
+               "message_id" => message_id,
+               "message" => %{"attachment_ids" => ["att-1"]}
+             })
+
+    assert [%{"type" => "image"}] =
+             Query.rows(
+               Repo.query(
+                 "SELECT type FROM chat_v2.messages WHERE message_id = $1",
+                 [message_id],
+                 type: true
+               )
+             )
+
+    assert linked_attachments(message_id) == ["att-1"]
+
+    # An attachment from another channel is not resolvable.
+    seed_bot_attachment("att-foreign")
+
+    Repo.query!(
+      "UPDATE chat_v2.attachments SET channel_id = 'ch-other' WHERE attachment_id = $1",
+      ["att-foreign"]
+    )
+
+    assert {:error, %LiliumChat.Errors.ApiError{code: "BOT_EFFECT_INVALID"}} =
+             BotEffects.apply(@channel, @bot, %{
+               "type" => "update_message",
+               "client_effect_id" => "up-att-foreign",
+               "message_id" => message_id,
+               "message" => %{"attachment_ids" => ["att-foreign"]}
+             })
+
+    # An empty list clears the relink and reverts the type to text.
+    assert {:applied, _} =
+             BotEffects.apply(@channel, @bot, %{
+               "type" => "update_message",
+               "client_effect_id" => "up-att-clear",
+               "message_id" => message_id,
+               "message" => %{"attachment_ids" => []}
+             })
+
+    assert [%{"type" => "text"}] =
+             Query.rows(
+               Repo.query(
+                 "SELECT type FROM chat_v2.messages WHERE message_id = $1",
+                 [message_id],
+                 type: true
+               )
+             )
+
+    assert linked_attachments(message_id) == []
+  end
+
+  test "apply: update_message gates — unknown / recalled / streaming messages" do
+    # unknown message
+    assert {:error, %LiliumChat.Errors.ApiError{code: "BOT_EFFECT_INVALID"}} =
+             BotEffects.apply(@channel, @bot, %{
+               "type" => "update_message",
+               "client_effect_id" => "up-404",
+               "message_id" => "no-such-message",
+               "message" => %{"text" => "x"}
+             })
+
+    {:applied, %{"message_id" => message_id}} =
+      BotEffects.apply(@channel, @bot, %{
+        "type" => "send_message",
+        "client_effect_id" => "seed-gate",
+        "message" => %{"type" => "text", "text" => "g"}
+      })
+
+    # a recalled message is not mutable
+    Repo.query!("UPDATE chat_v2.messages SET status = 'recalled' WHERE message_id = $1", [
+      message_id
+    ])
+
+    assert {:error, %LiliumChat.Errors.ApiError{code: "BOT_EFFECT_INVALID"}} =
+             BotEffects.apply(@channel, @bot, %{
+               "type" => "update_message",
+               "client_effect_id" => "up-recalled",
+               "message_id" => message_id,
+               "message" => %{"text" => "x"}
+             })
+
+    # a streaming message is not mutable
+    Repo.query!(
+      "UPDATE chat_v2.messages SET status = 'normal', stream_state = 'streaming' WHERE message_id = $1",
+      [message_id]
+    )
+
+    assert {:error, %LiliumChat.Errors.ApiError{code: "BOT_EFFECT_INVALID"}} =
+             BotEffects.apply(@channel, @bot, %{
+               "type" => "update_message",
+               "client_effect_id" => "up-streaming",
+               "message_id" => message_id,
+               "message" => %{"text" => "x"}
+             })
+  end
+
+  # ----------------------------------------------- disable_components (#19)
+
+  test "apply: disable_components disables only the listed components" do
+    c1 = Ids.uuidv7()
+    c2 = Ids.uuidv7()
+
+    components = [
+      %{
+        "component_id" => c1,
+        "kind" => "button",
+        "style" => "primary",
+        "custom_id" => "confirm",
+        "label" => "Yes",
+        "disabled" => false
+      },
+      %{
+        "component_id" => c2,
+        "kind" => "button",
+        "style" => "danger",
+        "custom_id" => "cancel",
+        "label" => "No",
+        "disabled" => false
+      }
+    ]
+
+    {:applied, %{"message_id" => message_id}} =
+      BotEffects.apply(@channel, @bot, %{
+        "type" => "send_message",
+        "client_effect_id" => "seed-cmp",
+        "message" => %{"type" => "text", "text" => "pick", "components" => components}
+      })
+
+    # components persisted to `components_json`
+    assert stored_component_ids(message_id) == [c1, c2]
+
+    assert {:applied, %{"message_id" => ^message_id, "event_id" => event_id}} =
+             BotEffects.apply(@channel, @bot, %{
+               "type" => "disable_components",
+               "client_effect_id" => "dis-1",
+               "message_id" => message_id,
+               "component_ids" => [c1]
+             })
+
+    assert is_binary(event_id)
+
+    stored = stored_components(message_id)
+    assert Enum.find(stored, &(&1["component_id"] == c1))["disabled"] == true
+    assert Enum.find(stored, &(&1["component_id"] == c2))["disabled"] != true
+
+    # unknown component id → BOT_EFFECT_INVALID
+    assert {:error, %LiliumChat.Errors.ApiError{code: "BOT_EFFECT_INVALID"}} =
+             BotEffects.apply(@channel, @bot, %{
+               "type" => "disable_components",
+               "client_effect_id" => "dis-2",
+               "message_id" => message_id,
+               "component_ids" => [Ids.uuidv7()]
+             })
+
+    # idempotent replay
+    assert {:cached, %{"message_id" => ^message_id}} =
+             BotEffects.apply(@channel, @bot, %{
+               "type" => "disable_components",
+               "client_effect_id" => "dis-1",
+               "message_id" => message_id,
+               "component_ids" => [c1]
+             })
+  end
+
+  # --------------------------------------------------------- start_stream (#19)
+
+  test "apply: start_stream allocates no event row and replay rehydrates the stream" do
+    effect = %{
+      "type" => "start_stream",
+      "client_effect_id" => "ss-replay",
+      "message" => %{"type" => "text", "text" => ""}
+    }
+
+    assert {:applied, result1} = BotEffects.apply(@channel, @bot, effect)
+    assert {:cached, result2} = BotEffects.apply(@channel, @bot, effect)
+
+    # the cached result is identical (same message_id + same handle)
+    assert result2["message_id"] == result1["message_id"]
+    assert result2["stream"] == result1["stream"]
+
+    message_id = result1["message_id"]
+
+    # the ephemeral stream process is still alive after the replay
+    assert %{status: :streaming, bot_id: @bot} =
+             LiliumChat.Stream.debug_state(@channel, message_id)
+
+    # no canonical messages row and NO event row for the ephemeral stream
+    assert Query.rows(
+             Repo.query("SELECT 1 FROM chat_v2.messages WHERE message_id = $1", [
+               message_id
+             ])
+           ) == []
+
+    assert event_count(@channel, "message.created") == 0
+  end
+
+  # ------------------------------------------------- projections (#19)
+
+  test "apply_effects: the live event frame carries the bot summary and components" do
+    component_id = Ids.uuidv7()
+
+    components = [
+      %{
+        "component_id" => component_id,
+        "kind" => "button",
+        "style" => "primary",
+        "custom_id" => "go",
+        "label" => "Go",
+        "disabled" => false
+      }
+    ]
+
+    {%{effect_results: [result], event_frames: [frame]}, _seq} =
+      BotEffects.apply_effects(@channel, 0, @bot, [
+        %{
+          "type" => "send_message",
+          "client_effect_id" => "proj-1",
+          "message" => %{"type" => "text", "text" => "interactive", "components" => components}
+        }
+      ])
+
+    assert result["status"] == "applied"
+    message_id = result["message_id"]
+
+    assert frame["type"] == "message.created"
+    message = frame["payload"]["message"]
+
+    # The bot sender is projected with the bot_apps summary (contract §3.4).
+    assert message["sender"] == %{
+             "kind" => "bot",
+             "bot" => %{"bot_id" => @bot, "display_name" => "Test Bot", "avatar_url" => nil}
+           }
+
+    # components round-trip into the stored row and the live projection.
+    assert Enum.map(message["components"], & &1["component_id"]) == [component_id]
+    assert stored_component_ids(message_id) == [component_id]
+  end
+
+  # ------------------------------------------------------------- helpers
+
+  defp seed_bot_attachment(attachment_id) do
+    now = DateTime.utc_now()
+
+    Repo.query!(
+      """
+      INSERT INTO chat_v2.attachments
+        (attachment_id, owner_user_id, owner_bot_id, channel_id, kind, filename,
+         mime_type, size_bytes, width, height, blurhash, storage_key, url, status, created_at)
+      VALUES ($1, NULL, $2, $3, 'image', 'f.png', 'image/png', 10, 10, 10, NULL, $4, $5, 'finalized', $6)
+      """,
+      [
+        attachment_id,
+        @bot,
+        @channel,
+        "k/#{attachment_id}",
+        "https://s3.example.com/#{attachment_id}",
+        now
+      ],
+      type: true
+    )
+  end
+
+  defp event_count(channel_id, event_type) do
+    Repo.query(
+      "SELECT COUNT(*) AS n FROM chat_v2.events WHERE channel_id = $1 AND event_type = $2",
+      [channel_id, event_type]
+    )
+    |> case do
+      {:ok, %{rows: [[n]]}} -> n
+    end
+  end
+
+  defp linked_attachments(message_id) do
+    Query.rows(
+      Repo.query(
+        "SELECT a.attachment_id AS attachment_id FROM chat_v2.message_attachments ma " <>
+          "JOIN chat_v2.attachments a ON a.attachment_id = ma.attachment_id " <>
+          "WHERE ma.message_id = $1 ORDER BY a.attachment_id",
+        [message_id],
+        type: true
+      )
+    )
+    |> Enum.map(& &1["attachment_id"])
+  end
+
+  defp stored_components(message_id) do
+    row =
+      Query.rows(
+        Repo.query(
+          "SELECT components_json FROM chat_v2.messages WHERE message_id = $1",
+          [message_id],
+          type: true
+        )
+      )
+      |> List.first()
+
+    Projections.json_list(row["components_json"])
+  end
+
+  defp stored_component_ids(message_id) do
+    stored_components(message_id) |> Enum.map(& &1["component_id"])
+  end
+
+  # Raw parameterized queries decode timestamptz as NaiveDateTime; parameterless
+  # ones as DateTime — accept either.
+  defp timestamp?(value), do: is_struct(value, NaiveDateTime) or is_struct(value, DateTime)
 end

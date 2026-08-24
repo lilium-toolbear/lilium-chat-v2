@@ -93,6 +93,53 @@ defmodule LiliumChatWeb.BotChannel do
     end
   end
 
+  def handle_in("session.effects", payload, socket) do
+    case BotGateway.parse_session_effects(payload) do
+      {:ok, parsed} ->
+        ack =
+          BotConnection.deliver_session_effects(
+            socket.assigns[:bot_id],
+            parsed
+          )
+
+        {:reply, {:ok, ack}, socket}
+
+      {:error, reason} ->
+        Logger.debug("bot session.effects rejected for #{socket.assigns[:bot_id]}: #{reason}")
+        {:noreply, socket}
+    end
+  end
+
+  def handle_in("session.close", payload, socket) do
+    case BotGateway.parse_session_close(payload) do
+      {:ok, %{session_id: session_id, reason: reason}} ->
+        BotConnection.deliver_session_close(
+          socket.assigns[:bot_id],
+          session_id,
+          reason
+        )
+
+        {:reply, {:ok, %{"status" => "ok"}}, socket}
+
+      {:error, reason} ->
+        Logger.debug("bot session.close rejected for #{socket.assigns[:bot_id]}: #{reason}")
+        {:noreply, socket}
+    end
+  end
+
+  def handle_in("session.input_ack", payload, socket) do
+    case BotGateway.parse_session_input_ack(payload) do
+      {:ok, parsed} ->
+        BotConnection.deliver_session_input_ack(socket.assigns[:bot_id], parsed)
+        {:reply, {:ok, %{"status" => "ok"}}, socket}
+
+      {:error, reason} ->
+        Logger.debug("bot session.input_ack rejected for #{socket.assigns[:bot_id]}: #{reason}")
+
+        {:noreply, socket}
+    end
+  end
+
   def handle_in(event, _payload, socket) do
     Logger.debug("BotChannel unhandled frame type: #{event}")
     {:noreply, socket}
@@ -102,7 +149,10 @@ defmodule LiliumChatWeb.BotChannel do
 
   @impl true
   def handle_info({:push_resume, frames}, socket) do
-    Enum.each(frames, fn frame -> push(socket, "delivery", frame) end)
+    # Delivery resume frames carry no `type` (pushed as `delivery`); the
+    # unacked `session.input` frames resume after them (old Worker
+    # `resumeStatefulSessions` order) and keep their frame type.
+    Enum.each(frames, fn frame -> push(socket, frame["type"] || "delivery", frame) end)
     {:noreply, socket}
   end
 

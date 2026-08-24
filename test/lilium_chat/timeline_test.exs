@@ -610,6 +610,96 @@ defmodule LiliumChat.TimelineTest do
     assert reads > 0
   end
 
+  # ------------------------------------------------ bot messages (#19)
+
+  test "messages_page replays bot messages with components + bot summary" do
+    ch = "cccccccc-0000-7000-8000-cccccccccccc"
+    bot_id = "bot-tl-0001"
+    seed_channel(ch, created_by: @viewer)
+    seed_membership(ch, @viewer, "member")
+    seed_profile(@viewer, "Viewer", nil)
+
+    # The read path resolves bot summaries live from bot_apps.
+    Repo.query!(
+      "INSERT INTO chat_v2.bot_apps (bot_id, owner_user_id, display_name, avatar_url, " <>
+        "description, visibility, status, created_at, updated_at) " <>
+        "VALUES ($1, 'owner', 'Kuma Bot', 'https://cdn.example.com/kuma.png', NULL, " <>
+        "'official', 'active', now(), now())",
+      [bot_id],
+      type: true
+    )
+
+    message_id = "cccccccc-0001-7000-8000-0000000000c1"
+    event_id = eid(1)
+    now = t(1)
+
+    Repo.query!(
+      """
+      INSERT INTO chat_v2.messages (message_id, command_id, dedupe_principal_key, channel_id,
+        sender_kind, sender_user_id, sender_bot_id, type, format, status, text, reply_to,
+        reply_snapshot_json, components_json, stream_state, invocation_json,
+        created_at, updated_at, event_id)
+      VALUES ($1, $2, $3, $4, 'bot', NULL, $5, 'text', 'markdown', 'normal', 'pick one',
+        NULL, NULL, $6, 'none', NULL, $7, $7, $8)
+      """,
+      [
+        message_id,
+        Ecto.UUID.generate(),
+        "bot:#{bot_id}",
+        ch,
+        bot_id,
+        Jason.encode!([
+          %{
+            "component_id" => "c-1",
+            "kind" => "button",
+            "custom_id" => "yes",
+            "label" => "Yes"
+          }
+        ]),
+        now,
+        event_id
+      ],
+      type: true
+    )
+
+    seed_event(
+      event_id,
+      ch,
+      "message.created",
+      %{"message" => %{"message_id" => message_id}},
+      actor_kind: "bot",
+      actor_id: bot_id,
+      occurred_at: now
+    )
+
+    page = Timeline.messages_page(@viewer, ch, %{})
+    assert length(page.items) == 1
+
+    frame = hd(page.items)
+    assert frame["type"] == "message.created"
+    message = frame["payload"]["message"]
+
+    # components round-trip from messages.components_json (contract §3.8)
+    assert message["components"] == [
+             %{
+               "component_id" => "c-1",
+               "kind" => "button",
+               "custom_id" => "yes",
+               "label" => "Yes"
+             }
+           ]
+
+    # the bot sender carries the bot_apps summary (contract §3.4)
+    assert message["sender"] == %{
+             "kind" => "bot",
+             "bot" => %{
+               "bot_id" => bot_id,
+               "display_name" => "Kuma Bot",
+               "avatar_url" => "https://cdn.example.com/kuma.png"
+             }
+           }
+  end
+
   # ------------------------------------------------------------- helpers
 
   defp t(n), do: DateTime.utc_now() |> DateTime.add(n, :second)

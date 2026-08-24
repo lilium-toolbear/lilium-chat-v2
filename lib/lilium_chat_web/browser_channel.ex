@@ -228,6 +228,29 @@ defmodule LiliumChatWeb.BrowserChannel do
     )
   end
 
+  # ------------------------------------------------ interaction.submit (#19)
+
+  # Browser entry for Bot interactions (brief §10): the `message_id` XOR
+  # `pin_id` locator rides in the PAYLOAD. The writer returns the
+  # `interaction.submit` response map; we wrap it in the command ack.
+  defp handle_command("interaction.submit", command_id, channel_id, payload, socket) do
+    user_id = socket.assigns[:user_id]
+
+    if is_nil(channel_id) do
+      missing_channel_reply(command_id, socket)
+    else
+      input = %{user_id: user_id, command_id: command_id, payload: payload}
+
+      case LiliumChat.Channel.submit_interaction(channel_id, input) do
+        {:ok, response} ->
+          {:reply, {:ok, Frames.command_ack("interaction.submit", command_id, response)}, socket}
+
+        {:error, %Errors.ApiError{} = api_error} ->
+          {:reply, {:error, Frames.command_error(command_id, error_map(api_error))}, socket}
+      end
+    end
+  end
+
   # ---------------------------------------------------- mark_read (#10)
 
   # User-local (no channel writer): the read_state cursor + the

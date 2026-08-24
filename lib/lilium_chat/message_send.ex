@@ -21,7 +21,19 @@ defmodule LiliumChat.MessageSend do
   responsible for broadcasting the returned event frame on `channel:<id>`.
   """
 
-  alias LiliumChat.{CanonicalJSON, Errors, Idempotency, Ids, Profiles, Projections, Query, Repo}
+  alias LiliumChat.{
+    CanonicalJSON,
+    Errors,
+    Idempotency,
+    Ids,
+    Profiles,
+    Projections,
+    Query,
+    Repo,
+    StatefulSessions
+  }
+
+  require Logger
 
   @operation "message.send"
 
@@ -194,7 +206,30 @@ defmodule LiliumChat.MessageSend do
 
     case result do
       {:ok, %{kind: :created, ack_frame: ack_frame, event_frame: event_frame}} ->
-        {%{kind: :created, ack_frame: ack_frame, event_frame: event_frame}, new_seq}
+        # Listen-rules enqueue for the channel's active stateful session
+        # (issue #19, contract §9.9): runs AFTER the create txn committed,
+        # best-effort (a failed enqueue never fails the send). A backlog
+        # overflow close returns its event frames + an advanced seq.
+        {extra_frames, seq_after} =
+          maybe_enqueue_listen_input(channel_id, new_seq, %{
+            event_id: event_frame["event_id"],
+            occurred_at: event_frame["occurred_at"],
+            message: event_frame["payload"]["message"],
+            type: parsed.type,
+            sender_kind: "user",
+            sender_user_id: user_id,
+            sender_bot_id: nil
+          })
+
+        {
+          %{
+            kind: :created,
+            ack_frame: ack_frame,
+            event_frame: event_frame,
+            event_frames: extra_frames
+          },
+          seq_after
+        }
 
       {:ok, %{kind: :cached, ack_frame: response}} ->
         # Cached inside the txn (concurrent duplicate) — no new event, seq held.
@@ -202,6 +237,23 @@ defmodule LiliumChat.MessageSend do
 
       {:error, %{kind: :error, error: api_error}} ->
         {%{kind: :error, error: api_error}, seq}
+    end
+  end
+
+  # Best-effort listen-input enqueue (issue #19, old Worker
+  # `enqueueStatefulInputForMessageCreated`): the channel may have no active
+  # session (no-op), the backlog may overflow (a close returns its event
+  # frames + an advanced seq), or the DB may hiccup — none of which may
+  # fail the user's `message.send`.
+  defp maybe_enqueue_listen_input(channel_id, seq, attrs) do
+    try do
+      case StatefulSessions.enqueue_input(channel_id, seq, attrs) do
+        {:ok, new_seq, extra} -> {extra[:event_frames] || [], new_seq}
+      end
+    rescue
+      e ->
+        Logger.warning("listen input enqueue failed: #{Exception.message(e)}")
+        {[], seq}
     end
   end
 

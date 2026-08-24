@@ -34,6 +34,7 @@ defmodule LiliumChat.BotDelivery do
     BotEffects,
     BotGateway,
     BotConnection,
+    Channel,
     Errors,
     Ids,
     Projections,
@@ -132,7 +133,10 @@ defmodule LiliumChat.BotDelivery do
 
   `attrs`: `:channel_id`, `:bot_id`, `:actor_user_id`, `:message_id`,
   `:component_id`, `:custom_id`, `:value`, `:command_id`,
-  `:dedupe_principal_key`, optional `:interaction_id`.
+  `:dedupe_principal_key`, optional `:interaction_id` and `:pin_id`
+  (pin-locator interactions — the delivery body then carries `pin_id`
+  instead of `message_id`, old Worker parity; the `interactions` row
+  stores the pin id in `message_id`).
 
   Returns `{:ok, %{delivery_id, interaction_id}}` or
   `{:error, %Errors.ApiError{}}` — on `BOT_OFFLINE` nothing is persisted.
@@ -149,7 +153,6 @@ defmodule LiliumChat.BotDelivery do
 
       body = %{
         "interaction_id" => interaction_id,
-        "message_id" => attrs[:message_id],
         "component" => %{
           "component_id" => attrs[:component_id],
           "custom_id" => attrs[:custom_id],
@@ -157,6 +160,13 @@ defmodule LiliumChat.BotDelivery do
         },
         "actor" => actor
       }
+
+      body =
+        if attrs[:pin_id] do
+          Map.put(body, "pin_id", attrs[:pin_id])
+        else
+          Map.put(body, "message_id", attrs[:message_id])
+        end
 
       {:ok, _} =
         Repo.transaction(fn ->
@@ -261,10 +271,14 @@ defmodule LiliumChat.BotDelivery do
   Process a bot `delivery_result` (contract §9.7). Called by the
   `Bot.<bot_id>` process.
 
-  Returns the `delivery_ack` frame (map). Effects are applied with
-  `(channel_id, bot_id, client_effect_id)` idempotency; a duplicate
-  `delivery_result` (at-least-once replay) re-runs the pipeline and the
-  idempotency rows replay the stored results — the ack is identical.
+  Returns the `delivery_ack` frame (map). The whole effect batch applies on
+  the per-channel writer (`LiliumChat.Channel`) in ONE PG transaction with
+  `(channel_id, bot_id, client_effect_id)` idempotency (old Worker
+  `applyValidatedEffects` parity — a `BOT_EFFECT_CONFLICT` anywhere in the
+  batch rolls the batch back); a duplicate `delivery_result`
+  (at-least-once replay) re-runs the pipeline and the idempotency rows
+  replay the stored results — the ack is identical. Post-commit, the
+  writer's finalize step enqueues listen inputs + live stream frames.
   """
   def apply_result(bot_id, delivery_id, effects) do
     case load_delivery(bot_id, delivery_id) do
@@ -273,28 +287,32 @@ defmodule LiliumChat.BotDelivery do
 
       row ->
         channel_id = row["channel_id"]
+        is_official = BotEffects.bot_official?(bot_id)
 
-        case BotEffects.validate(effects, is_official: BotEffects.bot_official?(bot_id)) do
+        case BotEffects.validate(effects, is_official: is_official) do
           {:error, %Errors.ApiError{} = api_error} ->
             finalize_failed(row, api_error)
             ack_failed(delivery_id, api_error.code, api_error.message)
 
           {:ok, _} ->
-            try do
-              results =
-                Enum.map(effects, fn effect ->
-                  case BotEffects.apply(channel_id, bot_id, effect) do
-                    {:cached, result} -> result
-                    {:applied, result} -> result
-                    {:error, %Errors.ApiError{} = api_error} -> throw(api_error)
-                  end
-                end)
+            # The delivery_result path never touches the session_control pin
+            # (that is the session.effects allowlist, contract §9.7.3).
+            case Channel.apply_bot_effects(channel_id, %{
+                   bot_id: bot_id,
+                   effects: effects,
+                   is_official: is_official,
+                   allow_session_control: false
+                 }) do
+              {:ok, %{effect_results: results}} ->
+                finalize_delivered(row)
 
-              finalize_delivered(row)
+                BotGateway.build_delivery_ack(
+                  delivery_id,
+                  "applied",
+                  %{"effect_results" => results}
+                )
 
-              BotGateway.build_delivery_ack(delivery_id, "applied", %{"effect_results" => results})
-            catch
-              :throw, %Errors.ApiError{} = api_error ->
+              {:error, %Errors.ApiError{} = api_error} ->
                 finalize_failed(row, api_error)
                 ack_failed(delivery_id, api_error.code, api_error.message)
             end

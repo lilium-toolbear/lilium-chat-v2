@@ -317,10 +317,13 @@ defmodule LiliumChat.Timeline do
             attachments: extras.attachments[message_row["message_id"]] || [],
             mentions: extras.mentions[message_row["message_id"]] || [],
             sticker: sticker_snapshot(extras.stickers[message_row["message_id"]]),
-            components: [],
+            components: Projections.json_list(message_row["components_json"]),
             command_invocation: command_invocation(message_row),
             reply_target_status:
-              message_row["reply_to"] && extras.reply_status[message_row["reply_to"]]
+              message_row["reply_to"] && extras.reply_status[message_row["reply_to"]],
+            bot_summary:
+              message_row["sender_bot_id"] &&
+                extras.bot_summaries[message_row["sender_bot_id"]]
           }
 
           %{"message" => Projections.project_message(message_row, profiles, per_message)}
@@ -554,7 +557,8 @@ defmodule LiliumChat.Timeline do
       batch(
         "SELECT message_id, command_id, channel_id, sender_kind, sender_user_id, sender_bot_id, " <>
           "type, format, status, text, reply_to, reply_snapshot_json, stream_state, " <>
-          "invocation_json, created_at, updated_at, edited_at, deleted_at, deleted_by, recalled_at " <>
+          "invocation_json, components_json, created_at, updated_at, edited_at, deleted_at, " <>
+          "deleted_by, recalled_at " <>
           "FROM chat_v2.messages WHERE message_id IN (?)",
         message_ids
       )
@@ -621,12 +625,35 @@ defmodule LiliumChat.Timeline do
 
     reply_status = Enum.into(reply_rows, %{}, fn r -> {r["message_id"], r["status"]} end)
 
+    # Bot sender summaries for replay (contract §3.4: `sender.bot.display_name`
+    # / `avatar_url`) — resolved live from `bot_apps` (issue #19; the v2
+    # `messages` table does not denormalize bot names).
+    bot_ids =
+      messages
+      |> Enum.map(& &1["sender_bot_id"])
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    bot_summaries =
+      if bot_ids == [] do
+        %{}
+      else
+        batch(
+          "SELECT bot_id, display_name, avatar_url FROM chat_v2.bot_apps WHERE bot_id IN (?)",
+          bot_ids
+        )
+        |> Enum.into(%{}, fn r ->
+          {r["bot_id"], %{"display_name" => r["display_name"], "avatar_url" => r["avatar_url"]}}
+        end)
+      end
+
     %{
       messages: messages_by_id,
       mentions: mentions_by_id,
       attachments: attachments_by_id,
       stickers: stickers_by_id,
-      reply_status: reply_status
+      reply_status: reply_status,
+      bot_summaries: bot_summaries
     }
   end
 

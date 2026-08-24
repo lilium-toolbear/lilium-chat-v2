@@ -69,16 +69,30 @@ defmodule LiliumChat.Stream do
     end
   end
 
-  @doc "Broadcast live-only `message.stream_started` on `channel:<id>`."
-  def broadcast_started(channel_id, message_id) do
+  @doc """
+  Broadcast the live-only `message.stream_started` frame on `channel:<id>`
+  (contract §9.14.3 / §9.15). `message` is the full Browser-visible
+  streaming projection (`text: ""`, `stream_state: "streaming"`, no
+  event row exists for it).
+  """
+  def broadcast_started(channel_id, message_id, message) when is_map(message) do
     frame =
       Frames.stream_event("message.stream_started", channel_id, %{
         "channel_id" => channel_id,
-        "message_id" => message_id
+        "message_id" => message_id,
+        "message" => message
       })
 
     broadcast_live(channel_id, frame)
     :ok
+  end
+
+  # Backward-compatible shape (message_id only).
+  def broadcast_started(channel_id, message_id) do
+    broadcast_started(channel_id, message_id, %{
+      "message_id" => message_id,
+      "channel_id" => channel_id
+    })
   end
 
   # ----------------------------------------------------------------- calls

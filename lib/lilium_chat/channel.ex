@@ -18,10 +18,13 @@ defmodule LiliumChat.Channel do
   use GenServer
 
   alias LiliumChat.{
+    ChannelJoin,
     ChannelLifecycle,
     ChannelPins,
+    Dms,
     Errors,
     Ids,
+    InviteCommands,
     MemberCommands,
     MessageMutate,
     MessageSend,
@@ -228,6 +231,68 @@ defmodule LiliumChat.Channel do
     )
   end
 
+  # ---------------------------------------------------------------- join (#13)
+
+  @doc """
+  Join a public channel (`POST /api/chat/channels/{channel_id}/join`,
+  contract §5.7, issue #13). Returns `{:ok, response}` or
+  `{:error, %LiliumChat.Errors.ApiError{}}`.
+  """
+  def join_channel(user_id, key, channel_id) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:join_channel, %{user_id: user_id, command_id: key}}, 30_000)
+  end
+
+  # ---------------------------------------------------------- invites (#13)
+
+  @doc """
+  Create (or refresh) the caller's personal invite
+  (`POST /api/chat/channels/{channel_id}/invites`, contract §5.8,
+  issue #13). `body` is the JSON request body. Returns `{:ok, response}`
+  or `{:error, %LiliumChat.Errors.ApiError{}}`.
+  """
+  def create_invite(user_id, key, channel_id, body) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(
+      pid,
+      {:create_invite, %{user_id: user_id, command_id: key, payload: body || %{}}},
+      30_000
+    )
+  end
+
+  @doc """
+  Accept an invite (`POST /api/chat/invites/{invite_code}/accept`,
+  contract §5.9, issue #13). `channel_id` is the routing channel resolved
+  by `LiliumChat.InviteCommands.route_for/1` (the URL has no channel id).
+  Returns `{:ok, response}` or `{:error, %LiliumChat.Errors.ApiError{}}`.
+  """
+  def accept_invite(user_id, key, channel_id, invite_code) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(
+      pid,
+      {:accept_invite, %{user_id: user_id, command_id: key, invite_code: invite_code}},
+      30_000
+    )
+  end
+
+  # ------------------------------------------------------------- DM open (#13)
+
+  @doc """
+  Route a `dm.open` through the target channel's writer (contract §5.2c,
+  issue #13). `input` is `%{user_id: binary, command_id: binary,
+  recipient_user_id: binary}` — the caller (`LiliumChat.Dms`) resolves the
+  routing channel via `dm_pairs` first. Returns `{:ok, response}` or
+  `{:error, %LiliumChat.Errors.ApiError{}}`.
+  """
+  def open_dm(channel_id, input) do
+    {:ok, pid} = ensure_started(channel_id)
+
+    GenServer.call(pid, {:open_dm, input}, 30_000)
+  end
+
   # --------------------------------------------------------- server callbacks
 
   @impl true
@@ -290,6 +355,22 @@ defmodule LiliumChat.Channel do
         MemberCommands.transfer_owner(state.channel_id, state.seq, input)
       end)
 
+  @impl true
+  def handle_call({:join_channel, input}, _from, state),
+    do: run_command(state, fn -> ChannelJoin.join(state.channel_id, state.seq, input) end)
+
+  @impl true
+  def handle_call({:create_invite, input}, _from, state),
+    do: run_command(state, fn -> InviteCommands.create(state.channel_id, state.seq, input) end)
+
+  @impl true
+  def handle_call({:accept_invite, input}, _from, state),
+    do: run_command(state, fn -> InviteCommands.accept(state.channel_id, state.seq, input) end)
+
+  @impl true
+  def handle_call({:open_dm, input}, _from, state),
+    do: run_command(state, fn -> Dms.open_dm(state.channel_id, state.seq, input) end)
+
   # Shared dispatch for every write command: run the domain op, rescue the
   # pre-txn business errors (all raises happen before the event_id is
   # allocated, so the held seq is unchanged), broadcast the committed event
@@ -323,6 +404,9 @@ defmodule LiliumChat.Channel do
   defp to_reply(%{kind: :role_updated, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :removed, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :transferred, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :joined, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :invite_created, response: response}), do: {:ok, response}
+  defp to_reply(%{kind: :opened, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :cached, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :error, error: api_error}), do: {:error, api_error}
 

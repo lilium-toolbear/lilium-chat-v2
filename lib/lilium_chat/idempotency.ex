@@ -102,6 +102,60 @@ defmodule LiliumChat.Idempotency do
   end
 
   @doc """
+  Writer-op idempotency transaction (D10/D11, issue #13). `fun` returns the
+  writer's tagged result payload (`%{kind: _, response: _, event_frames: _,
+  user_hints: _, seq: _}`); the payload's `:response` is recorded via
+  `write_completed/6` in the same transaction.
+
+  Returns `{:ok, tagged_payload}` (fresh commit or cached replay — replays
+  are rebuilt as `%{kind: :cached, response: response}`) or
+  `{:error, %LiliumChat.Errors.ApiError{}}` (key conflict, or a
+  `Repo.rollback(%{kind: :error, error: ...})` business gate from `fun`).
+  Exceptions out of `fun` propagate (rolling the transaction back).
+  """
+  def run_writer_operation(
+        principal_kind,
+        principal_id,
+        operation,
+        operation_id,
+        request_hash,
+        fun
+      ) do
+    case Repo.transaction(fn ->
+           case check(principal_kind, principal_id, operation, operation_id, request_hash) do
+             {:conflict, api_error} ->
+               Repo.rollback(api_error)
+
+             {:cached, response} ->
+               %{kind: :cached, response: response}
+
+             :missing ->
+               payload = fun.()
+
+               write_completed(
+                 principal_kind,
+                 principal_id,
+                 operation,
+                 operation_id,
+                 request_hash,
+                 payload[:response]
+               )
+
+               payload
+           end
+         end) do
+      {:ok, payload} ->
+        {:ok, payload}
+
+      {:error, %Errors.ApiError{} = api_error} ->
+        {:error, api_error}
+
+      {:error, %{kind: :error, error: api_error}} ->
+        {:error, api_error}
+    end
+  end
+
+  @doc """
   Store the committed ack payload for an operation id. Must run in the same
   transaction as the business mutation (contract §2.5).
   """

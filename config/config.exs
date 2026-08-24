@@ -53,6 +53,12 @@ config :lilium_chat, :cors,
     "http://127.0.0.1:3334"
   ]
 
+# SPA origin for user-facing URLs — the old Worker's `API_BASE_URL`
+# (wrangler.jsonc: https://lilium.kuma.homes — the SPA origin, NOT the
+# chat API host chat.kuma.homes; contract v2.15 correction). Used for
+# the §5.8 invite create response `invite_url`.
+config :lilium_chat, :api_base_url, "https://lilium.kuma.homes"
+
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"

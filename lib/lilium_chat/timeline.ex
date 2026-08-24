@@ -70,6 +70,49 @@ defmodule LiliumChat.Timeline do
     "interaction.created"
   ]
 
+  # Browser wire event set (old Worker `CHAT_EVENT_TYPES`, 31 types) +
+  # v2's `system.notice` (contract §10.4 delta). The gap-recovery (§6.1b)
+  # and global (§10.3) replay paths apply NO SQL type filter — they drop
+  # every other stored type at projection time, matching the old Worker's
+  # `isChatEventType` guard (replay-projection.ts): the bookkeeping
+  # `this.created` row (DM create / archive import) never reaches the wire.
+  # The history / context paths are already SQL-filtered to
+  # `@timeline_types`, a subset of this set.
+  @wire_event_types [
+    "message.created",
+    "message.updated",
+    "message.deleted",
+    "message.recalled",
+    "message.stream_started",
+    "message.stream_delta",
+    "message.stream_finalized",
+    "message.stream_abandoned",
+    "member.joined",
+    "member.left",
+    "member.removed",
+    "member.role_updated",
+    "channel.created",
+    "channel.updated",
+    "channel.archived",
+    "channel.dissolved",
+    "bot.installed",
+    "bot.updated",
+    "command.binding_updated",
+    "command.invoked",
+    "command.completed",
+    "command.failed",
+    "stateful_session.started",
+    "stateful_session.updated",
+    "stateful_session.closed",
+    "channel.pin.set",
+    "channel.pin.updated",
+    "channel.pin.cleared",
+    "interaction.created",
+    "interaction.completed",
+    "interaction.failed",
+    "system.notice"
+  ]
+
   # ------------------------------------------------------------------ public
 
   @doc "Timeline history page (`GET /channels/{id}/messages`, §6.1)."
@@ -191,6 +234,17 @@ defmodule LiliumChat.Timeline do
   end
 
   defp project_event_frame(channel_id, row, profiles, extras) do
+    # Wire-set guard (old Worker `isChatEventType` parity, issue #13):
+    # non-wire stored types (e.g. the DM `this.created` bookkeeping row)
+    # are dropped from the replay page.
+    unless row["event_type"] in @wire_event_types do
+      nil
+    else
+      do_project_event_frame(channel_id, row, profiles, extras)
+    end
+  end
+
+  defp do_project_event_frame(channel_id, row, profiles, extras) do
     payload = Projections.json_map(row["payload"]) || %{}
 
     wire_payload =

@@ -49,6 +49,8 @@ defmodule LiliumChatWeb.Router do
     get "/channels/:channel_id", ChannelsController, :show
     patch "/channels/:channel_id", ChannelsController, :update
     post "/channels/:channel_id/dissolve", ChannelsController, :dissolve
+    # Join public channel (contract §5.7, issue #13).
+    post "/channels/:channel_id/join", ChannelsController, :join
     get "/channels/:channel_id/messages", MessagesController, :index
     get "/channels/:channel_id/messages/:message_id/context", MessageContextController, :show
     get "/channels/:channel_id/events", EventsController, :channel_index
@@ -84,6 +86,11 @@ defmodule LiliumChatWeb.Router do
     delete "/channels/:channel_id/members/:user_id", MembersController, :delete
     post "/channels/:channel_id/owner-transfer", MembersController, :transfer_owner
     get "/invites/:invite_code", InvitesController, :preview
+    # Invite create + accept (contract §5.8 / §5.9, issue #13).
+    post "/channels/:channel_id/invites", InvitesController, :create
+    post "/invites/:invite_code/accept", InvitesController, :accept
+    # DM get-or-create (contract §5.2c, issue #13).
+    post "/dms", DmsController, :create
     # Personal sticker library (contract §8.3): list (issue #7) + save/delete
     # (issue #15, Idempotency-Key required).
     get "/stickers", StickersController, :index

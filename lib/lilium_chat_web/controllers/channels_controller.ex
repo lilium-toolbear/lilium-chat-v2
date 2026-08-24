@@ -11,6 +11,8 @@ defmodule LiliumChatWeb.ChannelsController do
 
   * `POST /api/chat/channels` — create (§5.2b, 201 + `membership`);
   * `PATCH /api/chat/channels/{channel_id}` — update metadata (§5.3);
+  * `POST /api/chat/channels/{channel_id}/join` — join public channel (§5.7,
+    issue #13);
   * `POST /api/chat/channels/{channel_id}/dissolve` — dissolve (§5.4).
 
   The controller is thin: read the authenticated `user_id`, the
@@ -61,6 +63,17 @@ defmodule LiliumChatWeb.ChannelsController do
     user_id = conn.assigns.identity.user_id
 
     with_result(Channel.update(user_id, key, channel_id, conn.body_params), conn, 200)
+  rescue
+    e -> ErrorHandler.render_exception(conn, e)
+  end
+
+  # -- POST /channels/{channel_id}/join (§5.7, issue #13) --------------------
+
+  def join(conn, %{"channel_id" => channel_id}) do
+    key = idempotency_key!(conn)
+    user_id = conn.assigns.identity.user_id
+
+    with_result(Channel.join_channel(user_id, key, channel_id), conn, 200)
   rescue
     e -> ErrorHandler.render_exception(conn, e)
   end

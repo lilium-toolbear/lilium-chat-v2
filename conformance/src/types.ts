@@ -18,6 +18,21 @@ export interface StepContext {
   vars: Map<string, unknown>;
 }
 
+/** Frame predicate used by WS steps (waitFor / alsoUntil / until / capture.from). */
+export type WsPredicate = (frame: unknown, ctx: StepContext) => boolean;
+
+/**
+ * Capture a var from a specific frame of the step's capture window: the
+ * FIRST frame in `matchedFrames` that satisfies `from`. Use for server
+ * frames that are not the ack (e.g. a bot `delivery` frame's `delivery_id`
+ * or a `session.start` frame's `session_id` — contract §9.7).
+ */
+export interface WsCaptureRef {
+  from: WsPredicate;
+  /** JSON pointer into the matched frame, e.g. `$.delivery_id`. */
+  pointer: string;
+}
+
 export interface ActorSpec {
   /** ToolBear user UUID — fixed per scenario, identical across targets. */
   userId: string;
@@ -83,20 +98,76 @@ export interface HttpStep extends BaseStep {
 
 export interface WsConnectStep extends BaseStep {
   kind: "ws.connect";
+  /**
+   * WS endpoint path (default `/api/chat/ws` — the browser socket).
+   * `${var}` interpolation is supported: the bot Stream WS path
+   * (`/api/chat/bot/channels/{ch}/streams/{msg}/ws`, contract §9.15) is
+   * assembled from captured ids.
+   */
+  path?: string;
+  /**
+   * Subprotocols to offer (default: the browser pair
+   * `["lilium.chat.v2", "bearer.<actor jwt>"]`). Bot sockets (contract §9.1 /
+   * §9.7 / §9.15) offer the contract version plus the `bearer.<bot_token>`
+   * entry — the Elixir sockets read the token from that subprotocol; the old
+   * Worker reads the Authorization header (sent via `headers` below). The
+   * server echoes the contract version on both targets, so
+   * `meta.negotiated_protocol` stays comparable.
+   */
+  protocols?: string[];
+  /**
+   * Extra upgrade request headers (values interpolated; `null` = omit).
+   * Bot WS upgrades carry `Authorization: Bearer <bot_token>` (the old
+   * Worker's ONLY token carrier on WS; the Elixir socket accepts either
+   * carrier, so sending both is safe on both).
+   */
+  headers?: Record<string, string | null>;
 }
 
 export interface WsCommandStep extends BaseStep {
   kind: "ws.command";
   /** Command frame to send (client owns `command_id`). */
   frame: unknown;
-  /** Close the capture window when a received frame satisfies this predicate. */
-  waitFor: (frame: unknown, ctx: StepContext) => boolean;
   /**
-   * Additional frame that must also arrive before the window closes (e.g. the
-   * fanout event after message.send ack). Ack-then-event vs event-then-ack
-   * both land in THIS step, so delivery-order races don't false-positive.
+   * Close the capture window when a received frame satisfies this predicate.
+   * When omitted, the frame is **fire-and-forget**: the server sends no
+   * reply frame in response (contract §9.7.4 — `session.start_ack`,
+   * `session.input_ack`, and `session.close` are answered only by the
+   * follow-up server-pushed frames such as `session.closed`), so the capture
+   * window closes immediately after the send and any queued frames are
+   * recorded under this step.
    */
-  alsoUntil?: (frame: unknown, ctx: StepContext) => boolean;
+  waitFor?: (frame: unknown, ctx: StepContext) => boolean;
+  /**
+   * Additional frame(s) that must also arrive before the window closes (e.g.
+   * the fanout event after message.send ack). Ack-then-event vs
+   * event-then-ack both land in THIS step, so delivery-order races don't
+   * false-positive. An array form waits for EVERY listed frame (issue #27
+   * D: an invoke window that must also contain the bot-side push — the
+   * `command_invocation` delivery, `session.start`, …).
+   */
+  alsoUntil?: WsPredicate | WsPredicate[];
+  /**
+   * Actors whose pending frames are pulled into THIS step's capture when the
+   * window closes (issue #27 D): after the actor-socket predicates match,
+   * each listed socket is spliced up to its last frame matching ANY window
+   * predicate. Deterministic placement of cross-socket frames (the bot
+   * `delivery` / `session.*` push that races the invoke ack+event) — they
+   * are captured under the step that triggered them on both targets.
+   * Unmatched trailing frames still land via the end-of-step drain.
+   */
+  alsoSplice?: string[];
+  /**
+   * varName → capture source. A string is a JSON pointer into the frame that
+   * matched `waitFor` (the ack — never the alsoUntil fanout frame); a
+   * `WsCaptureRef` object captures from the first window frame that
+   * satisfies `from` (server-minted ids that only exist on a non-ack frame —
+   * e.g. the `start_stream` effect result's `message_id`, which is the
+   * Stream WS path parameter, or a bot `delivery` frame's `delivery_id`).
+   * Resolution runs after the end-of-step drain, so a frame that arrives
+   * during the 400ms settle still resolves.
+   */
+  capture?: Record<string, string | WsCaptureRef>;
   waitTimeoutMs?: number;
 }
 

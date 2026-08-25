@@ -132,6 +132,71 @@
  *     the UserSummary shape but not the resolution source, so only the
  *     display name is placeholdered; `user_id` / `avatar_url` remain compared.
  *
+ *   Issue #27 batch D (bot domain — HTTP + Bot Gateway WS + Bot Stream WS):
+ *   - `GET /api/chat/commands/directory` `items` (contract §9.12.1): SORTED
+ *     on both sides by (bot_command_id, name). §9.12.1 pins the
+ *     `{ items, next_cursor }` shape but not the item order. Both
+ *     implementations ORDER BY `updated_at DESC, bot_command_id DESC`, but
+ *     catalog sync mints every command with ONE shared timestamp, so
+ *     `updated_at` ties and the ORDER BY falls through to the RANDOM TAILS
+ *     of the server-minted UUIDv7 ids — which differ per target (each DB
+ *     mints its own), so the item order is a per-target coin flip (the
+ *     bot-http directory steps flipped ask/ponder order across runs). The
+ *     sort runs AFTER the deep value pass, when `bot_command_id` is already
+ *     `{{UUID}}`, so the key reduces to the scenario-deterministic command
+ *     name. Same family as the batch B channel-list sort.
+ *   - `ws_url` (the `start_stream` effect result `stream.ws_url`, contract
+ *     §9.7.3) → `ws://{{HOST}}<path>`: the host is a deployment detail
+ *     (each target builds the URL from its own listen address —
+ *     127.0.0.1:8791 vs 127.0.0.1:4000); the path's channel/message UUIDs
+ *     go through the embedded-UUID rule and stay comparable.
+ *   - `delivery` frames, kind `command_invocation` (contract §9.7.1): the
+ *     body the old Worker queues is `{delivery_type, invocation_id,
+ *     bot_command: {…no options…}, invoker, options, reply_to?}` while the
+ *     contract shows `{invocation_id, command: {…options…}, invoker}` (the
+ *     v2 implementation conforms). Both sides are aligned to the contract
+ *     shape: `command` := `bot_command` (with the old Worker's top-level
+ *     `options` merged in), then `bot_command` / `delivery_type` / top-level
+ *     `options` / `reply_to` are dropped.
+ *   - `command.invoke` `command_ack` payload (contract §9.5): the old Worker
+ *     additionally returns an `invocation_message` projection; the contract
+ *     ack payload is `{channel_id, invocation_id, event_id}`. Dropped from
+ *     both sides (the invocation message itself is still compared through
+ *     its own `message.created` fanout frame on both targets).
+ *   - `command.invoked` event frames — LIVE fanout AND replay reads
+ *     (GET events / messages timeline / bootstrap), both sides (contract
+ *     §9.5 live example / §9.6.2 storage rule): the old Worker persists AND
+ *     emits the subset payload `{invocation, command_id}`; the v2
+ *     implementation carries the full wire payload
+ *     (`+ command_name + invoked_name + actor`). The contract §9.6.2
+ *     storage rule keeps stable ids only (replay re-projects display
+ *     fields live), so `payload.command_name` / `payload.invoked_name` /
+ *     `payload.actor` are dropped from both sides — the `invocation`
+ *     block and `command_id` stay compared.
+ *   - `command_snapshot_json` (`command.binding_updated` event payload
+ *     `binding_changes`, contract §9.5 binding delta): the `before` /
+ *     `after` snapshot values are JSON-encoded STRINGS on the old Worker
+ *     and parsed OBJECTS on the v2 implementation (the contract shows the
+ *     snapshot object, not its encoding). String values are parsed to
+ *     objects on both sides so the same snapshot content is compared.
+ *   - `definition_hash` inside Bot Gateway frames (contract §9.7.1
+ *     `delivery` body `command`, §9.7.4 `session.start` `bot_command`):
+ *     `command.definition_hash` / `bot_command.definition_hash` →
+ *     `{{DEF_HASH}}`. The value is a server-computed definition hash —
+ *     the old Worker persists the literal fallback `snapshot:<bot_command_id>`
+ *     (old `command.ts` definition_hash fallback), the v2 implementation
+ *     the real sha256; the contract fixes the field, not the algorithm
+ *     output.
+ *
+ *   - `meta.close` (WS close code, on `ws.close` steps): DROPPED from both
+ *     sides. The close code is a transport detail (Cowboy vs miniflare
+ *     legitimately differ) — the old Worker closes a secondary
+ *     live-session browser socket gracefully (the code is not captured
+ *     before the async close settles) while the v2 implementation has
+ *     closed the same socket with a spurious 1002 (protocol error). The
+ *     DATA (wsReceived frames / HTTP bodies) is the parity signal; the
+ *     close code is not (see the 2026-08-25 batch D report, message-write).
+ *
  * TRANSPORT-level response headers are dropped from BOTH captures before
  * diffing — they are HTTP/1.1 framing / server-framework details, not API
  * contract (miniflare vs Bandit legitimately differ):
@@ -204,6 +269,20 @@ export const PLACEHOLDER_BOT_TOKEN = "{{BOT_TOKEN}}";
  */
 export const PLACEHOLDER_PINNED_BY_NAME = "{{PINNED_BY_NAME}}";
 
+/**
+ * WebSocket endpoint host inside a `ws_url` (contract §9.7.3 `start_stream`
+ * result): each target builds the stream URL from its own listen address
+ * (127.0.0.1:8791 vs 127.0.0.1:4000) — the host is deployment config, the
+ * path stays compared (see module doc, issue #27 batch D).
+ */
+export const PLACEHOLDER_HOST = "{{HOST}}";
+/**
+ * Server-computed command definition hash inside Bot Gateway frames (see
+ * module doc, issue #27 batch D): the old Worker persists the literal
+ * `snapshot:<bot_command_id>` fallback, the v2 implementation the real
+ * sha256 — the algorithm output is not compared.
+ */
+export const PLACEHOLDER_DEF_HASH = "{{DEF_HASH}}";
 /** Presigned S3 PUT object path — see module doc (contract §8.1). */
 export const PLACEHOLDER_S3_OBJECT_PATH = "{{S3_OBJECT_PATH}}";
 /** Volatile SigV4 signature value (covers X-Amz-Date). */
@@ -395,6 +474,38 @@ function normalizeDeep(
       // server-minted → mask only the last path segment.
       if (key === "invite_url" && typeof v === "string") {
         out[finalKey] = normalizeInviteUrl(v);
+        continue;
+      }
+      // `ws_url` (contract §9.7.3 `start_stream` result): mask the host —
+      // each target serves the stream WS from its own listen address — and
+      // run the embedded-UUID pass over the rest so the path's
+      // channel/message UUIDs (server-minted, differ per run) are masked and
+      // the path stays comparable (see module doc, issue #27 batch D).
+      if (key === "ws_url" && typeof v === "string") {
+        const hostMasked = v.replace(/^(wss?:\/\/)[^\s/]+/i, `$1${PLACEHOLDER_HOST}`);
+        out[finalKey] = normalizeString(hostMasked, opts, context);
+        continue;
+      }
+      // `command_snapshot_json` (command.binding_updated payload
+      // `binding_changes`, issue #27 D — see module doc): the old Worker
+      // stores the `before` / `after` snapshots as JSON-encoded STRINGS,
+      // the v2 implementation as parsed OBJECTS. Parse strings to objects
+      // (recursively normalized — the embedded UUIDs get masked) so both
+      // sides compare as the same structural snapshot.
+      if (key === "command_snapshot_json" && v !== null && typeof v === "object" && !Array.isArray(v)) {
+        const snapshot: Record<string, unknown> = {};
+        for (const [innerKey, innerValue] of Object.entries(v as Record<string, unknown>)) {
+          if (typeof innerValue === "string") {
+            try {
+              snapshot[innerKey] = normalizeDeep(JSON.parse(innerValue), opts, context);
+              continue;
+            } catch {
+              // not JSON (e.g. "null") — compare as-is
+            }
+          }
+          snapshot[innerKey] = normalizeDeep(innerValue, opts, context);
+        }
+        out[finalKey] = snapshot;
         continue;
       }
       // `pinned_by` (ChannelPin, contract §3.10.3): denormalized UserSummary.
@@ -631,6 +742,48 @@ function trimListedChannelSummaries(body: unknown, path: string): unknown {
 }
 
 /**
+ * Sort key for command-directory items (see module doc, issue #27 batch D):
+ * (bot_command_id, name). The sort runs AFTER the deep value pass, where
+ * `bot_command_id` is already `{{UUID}}` (catalog-sync-minted, not a known
+ * client id), so the key reduces to the scenario-deterministic command name
+ * — identical on both targets despite the server-side ORDER BY
+ * (updated_at DESC, bot_command_id DESC) tying on the shared catalog-sync
+ * timestamp and falling through to per-target random UUIDv7 id tails.
+ */
+function commandDirectorySortKey(item: unknown): [string, string] {
+  if (item !== null && typeof item === "object") {
+    const record = item as Record<string, unknown>;
+    const id = typeof record["bot_command_id"] === "string" ? record["bot_command_id"] : "";
+    const name = typeof record["name"] === "string" ? record["name"] : "";
+    return [id, name];
+  }
+  return ["", ""];
+}
+
+function compareCommandDirectoryItems(a: unknown, b: unknown): number {
+  const ka = commandDirectorySortKey(a);
+  const kb = commandDirectorySortKey(b);
+  if (ka[0] !== kb[0]) return ka[0] < kb[0] ? -1 : 1;
+  if (ka[1] !== kb[1]) return ka[1] < kb[1] ? -1 : 1;
+  return 0;
+}
+
+/**
+ * `GET /api/chat/commands/directory` (contract §9.12.1, issue #27 batch D):
+ * the response is `{ items, next_cursor }` — the contract pins the shape, not
+ * the item order (see module doc). Sort `items` in place on both sides;
+ * `next_cursor` passes through compared.
+ */
+function sortCommandDirectoryItems(body: unknown): unknown {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return body;
+  const record = body as Record<string, unknown>;
+  if (Array.isArray(record["items"])) {
+    record["items"] = (record["items"] as unknown[]).slice().sort(compareCommandDirectoryItems);
+  }
+  return record;
+}
+
+/**
  * Event-frame normalizations (contract §10.4, issue #27). Applied to the whole
  * response body / WS capture after the deep value pass:
  *   * drop `payload.channel_id` / `payload.event_id` from `message.*` event
@@ -665,6 +818,16 @@ function normalizeEventFrames(value: unknown): unknown {
       if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
         delete (payload as Record<string, unknown>)["channel_id"];
         delete (payload as Record<string, unknown>)["event_id"];
+        // issue #27 D (see module doc): command.invoked — the old Worker
+        // persists the `{invocation, command_id}` subset, the v2
+        // implementation the full wire payload; the display fields are
+        // re-projected live on replay (contract §9.6.2), so drop them on
+        // BOTH sides (LIVE fanout and every replay read).
+        if (out["type"] === "command.invoked") {
+          delete (payload as Record<string, unknown>)["command_name"];
+          delete (payload as Record<string, unknown>)["invoked_name"];
+          delete (payload as Record<string, unknown>)["actor"];
+        }
       }
     }
     return out;
@@ -743,6 +906,69 @@ function normalizeBatchBErrorMessages(body: unknown, method: string, pathNoQuery
   return body;
 }
 
+/**
+ * Issue #27 batch D (see module doc): contract-shape alignment for Bot
+ * Gateway frames, applied to `wsSent` / `wsReceived` frames:
+ *
+ *   * `delivery` frames of kind `command_invocation` → contract §9.7.1 body
+ *     (`command` key, options nested, no `delivery_type` / top-level
+ *     `options` / `reply_to` — the old Worker's queued body shape);
+ *   * `command.invoke` `command_ack` payloads → contract §9.5 shape (no
+ *     `invocation_message` — the old Worker's extra field);
+ *   * `definition_hash` → `{{DEF_HASH}}` on `delivery` (kind
+ *     `command_invocation`) `command` and `session.start` `bot_command`
+ *     (see module doc, issue #27 D).
+ *
+ * The `command.invoked` payload trim lives in `normalizeEventFrames` (it
+ * applies to replay reads as well as WS frames — see module doc).
+ */
+function normalizeBotFrames(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((v) => normalizeBotFrames(v));
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(record)) out[k] = normalizeBotFrames(v);
+
+    if (out["type"] === "delivery" && out["kind"] === "command_invocation") {
+      const botCommand = out["bot_command"];
+      if (out["command"] === undefined && botCommand !== undefined) {
+        const cmd: Record<string, unknown> = { ...(botCommand as Record<string, unknown>) };
+        if (out["options"] !== undefined) cmd["options"] = out["options"];
+        out["command"] = cmd;
+      }
+      const command = out["command"];
+      if (command !== null && typeof command === "object" && !Array.isArray(command)) {
+        if (Object.hasOwn(command as Record<string, unknown>, "definition_hash")) {
+          (command as Record<string, unknown>)["definition_hash"] = PLACEHOLDER_DEF_HASH;
+        }
+      }
+      delete out["bot_command"];
+      delete out["delivery_type"];
+      delete out["options"];
+      delete out["reply_to"];
+    }
+
+    if (out["frame_type"] === "command_ack" && out["command"] === "command.invoke") {
+      const payload = out["payload"];
+      if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+        delete (payload as Record<string, unknown>)["invocation_message"];
+      }
+    }
+
+    if (out["type"] === "session.start") {
+      const botCommand = out["bot_command"];
+      if (botCommand !== null && typeof botCommand === "object" && !Array.isArray(botCommand)) {
+        if (Object.hasOwn(botCommand as Record<string, unknown>, "definition_hash")) {
+          (botCommand as Record<string, unknown>)["definition_hash"] = PLACEHOLDER_DEF_HASH;
+        }
+      }
+    }
+
+    return out;
+  }
+  return value;
+}
+
 // ---------------------------------------------------------------------------
 // HTTP header normalization
 // ---------------------------------------------------------------------------
@@ -782,6 +1008,20 @@ function normalizeResponseHeaders(
 export function normalizeCapture(capture: Capture, opts: NormalizeOptions = {}): Capture {
   const steps = capture.steps.map((step) => {
     const next: Record<string, unknown> = { ...step };
+    // `meta.close` (WS close code, issue #27 batch D): the close code is a
+    // TRANSPORT detail, not API contract — Cowboy (v2) and miniflare (old
+    // Worker) legitimately differ. Concretely the old Worker closes a
+    // secondary live-session browser socket gracefully (the code is not
+    // captured before the async close settles) while the v2 implementation
+    // has closed the same socket with a spurious 1002 (protocol error) —
+    // see the 2026-08-25 batch D report, message-write step 101. The DATA
+    // (wsReceived frames / HTTP bodies) is the parity signal; the close
+    // code is not. Drop it from both sides (other meta fields, e.g.
+    // `negotiated_protocol`, stay compared).
+    if (step.meta !== undefined) {
+      const { close: _close, ...metaRest } = step.meta as Record<string, unknown>;
+      next["meta"] = metaRest;
+    }
     if (step.http) {
       const requestBody = step.http.request.body;
       let responseBody = normalizeDeep(step.http.response.body, opts, "body");
@@ -803,6 +1043,16 @@ export function normalizeCapture(capture: Capture, opts: NormalizeOptions = {}):
         (pathNoQuery === "/api/chat/channels" || pathNoQuery === "/api/chat/bootstrap")
       ) {
         responseBody = trimListedChannelSummaries(responseBody, pathNoQuery);
+      }
+      // Contract-delta: command-directory item order (§9.12.1, issue #27
+      // batch D — see module doc): the contract pins the
+      // `{ items, next_cursor }` shape, not the order; sort `items` on both
+      // sides by (bot_command_id, name).
+      if (
+        step.http.request.method === "GET" &&
+        pathNoQuery === "/api/chat/commands/directory"
+      ) {
+        responseBody = sortCommandDirectoryItems(responseBody);
       }
       // Contract-delta: FORBIDDEN wording on channel detail (§2.6) +
       // ChannelDetail `last_message_preview`/`last_message_at` trim (§3.3).
@@ -839,7 +1089,7 @@ export function normalizeCapture(capture: Capture, opts: NormalizeOptions = {}):
     }
     if (step.wsSent !== undefined) {
       next.wsSent = step.wsSent.map((f) =>
-        normalizeEventFrames(normalizeIdempotencyConflict(normalizeDeep(f, opts, "body"))),
+        normalizeBotFrames(normalizeEventFrames(normalizeIdempotencyConflict(normalizeDeep(f, opts, "body")))),
       );
     }
     if (step.wsReceived !== undefined) {
@@ -849,7 +1099,7 @@ export function normalizeCapture(capture: Capture, opts: NormalizeOptions = {}):
       const frames = step.wsReceived.map((f) =>
         normalizeIdempotencyConflict(normalizeDeep(f, opts, "body")),
       );
-      next.wsReceived = normalizeEventFrames(frames) as unknown as StepCapture["wsReceived"];
+      next.wsReceived = normalizeBotFrames(normalizeEventFrames(frames)) as unknown as StepCapture["wsReceived"];
     }
     return next as unknown as StepCapture;
   });

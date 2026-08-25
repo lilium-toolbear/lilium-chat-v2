@@ -36,6 +36,9 @@ import { inviteLifecycle } from "../scenarios/invite-lifecycle.js";
 import { publicJoin } from "../scenarios/public-join.js";
 import { dmOpen } from "../scenarios/dm-open.js";
 import { messageWrite } from "../scenarios/message-write.js";
+import { botHttp } from "../scenarios/bot-http.js";
+import { botGatewayWs } from "../scenarios/bot-gateway-ws.js";
+import { botStreamWs } from "../scenarios/bot-stream-ws.js";
 import { MockTarget } from "./targets/mock.js";
 import { WorkerTarget } from "./targets/worker.js";
 import { ElixirTarget } from "./targets/elixir.js";
@@ -57,6 +60,9 @@ const SCENARIOS: Record<string, Scenario> = {
   "public-join": publicJoin,
   "dm-open": dmOpen,
   "message-write": messageWrite,
+  "bot-http": botHttp,
+  "bot-gateway-ws": botGatewayWs,
+  "bot-stream-ws": botStreamWs,
 };
 
 const DEFAULT_JWT_SECRET = "test-jwt-secret-do-not-use-in-prod"; // old repo test secret

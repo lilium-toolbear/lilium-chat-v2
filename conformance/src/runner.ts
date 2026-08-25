@@ -14,8 +14,11 @@ import type {
   Scenario,
   Step,
   StepCapture,
+  WsCaptureRef,
   WsCommandStep,
+  WsConnectStep,
   WsEventStep,
+  WsPredicate,
 } from "./types.js";
 
 export interface Endpoint {
@@ -215,17 +218,32 @@ export async function runScenario(scenario: Scenario, endpoint: Endpoint, opts: 
   };
 
   /**
-   * Wait until EVERY predicate has matched some frame in `pending`. Returns
-   * frames up to and including the last match, so ack+event land in one
-   * window regardless of arrival order.
+   * Wait until EVERY predicate has matched some frame in the ACTOR's
+   * `pending`. Returns frames up to and including the last match, so
+   * ack+event land in one window regardless of arrival order.
+   *
+   * With `alsoSplice` (issue #27 D): after the window closes, each listed
+   * actor's socket is ALSO spliced up to its last predicate-matching frame
+   * — cross-socket frames (the bot `delivery` / `session.*` push that races
+   * the browser ack+event) are captured under this step on both targets.
+   * On timeout the actor's ENTIRE pending is returned (legacy); the listed
+   * sockets are drained in full as well (the whole step window is over).
    */
   const waitUntilAll = async (
     actor: string,
     predicates: Array<(frame: unknown) => boolean>,
     timeoutMs: number,
+    alsoSplice?: string[],
   ): Promise<{ matchedFrames: unknown[]; timedOut: boolean }> => {
     const session = sockets.get(actor);
     if (!session) throw new Error(`no open socket for actor ${actor}`);
+    const spliceActors: Array<[string, SocketSession]> = [
+      [actor, session],
+      ...(alsoSplice
+        ?.filter((a) => a !== actor && sockets.has(a))
+        .map((a): [string, SocketSession] => [a, sockets.get(a)!])
+        ?? []),
+    ];
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const unmatched = new Set(predicates);
@@ -239,22 +257,45 @@ export async function runScenario(scenario: Scenario, endpoint: Endpoint, opts: 
           }
         }
         if (unmatched.size === 0) {
-          return { matchedFrames: session.pending.splice(0, last + 1), timedOut: false };
+          const matchedFrames: unknown[] = session.pending.splice(0, last + 1);
+          for (const [, extra] of spliceActors.slice(1)) {
+            // Last index of a frame matching ANY window predicate (the
+            // legacy "up to the last match" semantics, per socket).
+            let extraLast = -1;
+            for (let i = 0; i < extra.pending.length; i++) {
+              for (const p of predicates) {
+                if (p(extra.pending[i])) extraLast = i;
+              }
+            }
+            if (extraLast >= 0) matchedFrames.push(...extra.pending.splice(0, extraLast + 1));
+          }
+          return { matchedFrames, timedOut: false };
         }
       }
       await new Promise((r) => setTimeout(r, 25));
     }
-    return { matchedFrames: session.pending.splice(0), timedOut: true };
+    const matchedFrames: unknown[] = session.pending.splice(0);
+    for (const [, extra] of spliceActors.slice(1)) matchedFrames.push(...extra.pending.splice(0));
+    return { matchedFrames, timedOut: true };
   };
 
-  const openSocket = async (actor: string): Promise<SocketSession> => {
+  const openSocket = async (actor: string, stepDef: WsConnectStep): Promise<SocketSession> => {
     const token = tokens.get(actor);
     if (!token) throw new Error(`no token for actor ${actor}`);
+    const path = interpolateString(stepDef.path ?? "/api/chat/ws", vars);
+    const protocols = (stepDef.protocols ?? ["lilium.chat.v2", `bearer.${token}`]).map((p) =>
+      interpolateString(p, vars),
+    );
+    const headers: Record<string, string> = { Origin: origin };
+    for (const [k, v] of Object.entries(stepDef.headers ?? {})) {
+      if (v === null) continue;
+      headers[k] = interpolateString(v, vars);
+    }
     const pending: unknown[] = [];
     const ws = new CapturingWebSocket({
-      url: `${endpoint.wsBase}/api/chat/ws`,
-      protocols: ["lilium.chat.v2", `bearer.${token}`],
-      headers: { Origin: origin },
+      url: `${endpoint.wsBase}${path}`,
+      protocols,
+      headers,
       onFrame: (frame) => pending.push(frame),
       onClose: (code, reason) => {
         const s = sockets.get(actor);
@@ -291,7 +332,7 @@ export async function runScenario(scenario: Scenario, endpoint: Endpoint, opts: 
           break;
         }
         case "ws.connect": {
-          const session = await openSocket(stepDef.actor);
+          const session = await openSocket(stepDef.actor, stepDef);
           step.meta = { negotiated_protocol: session.ws.negotiatedProtocol };
           break;
         }
@@ -303,16 +344,48 @@ export async function runScenario(scenario: Scenario, endpoint: Endpoint, opts: 
           const frame = interpolateDeep(stepDef.frame, vars);
           sockets.get(stepDef.actor)!.ws.send(frame);
           step.wsSent = [frame];
-          const predicates: Array<(f: unknown) => boolean> = [(f) => stepDef.waitFor(f, { vars })];
-          if (stepDef.alsoUntil) predicates.push((f) => stepDef.alsoUntil!(f, { vars }));
+          if (!stepDef.waitFor) {
+            // Fire-and-forget (contract §9.7.4 silent session acks): no
+            // server reply is expected on this socket, so close the window
+            // right after the send. Frames already queued belong to this
+            // step; frames that arrive after the send land in the next step
+            // on both targets (the follow-up server push, e.g. the
+            // `session.closed` after `session.close`).
+            const session = sockets.get(stepDef.actor)!;
+            step.wsReceived = session.pending.splice(0);
+            break;
+          }
+          const waitFor = stepDef.waitFor;
+          const alsoUntilList: WsPredicate[] = stepDef.alsoUntil
+            ? Array.isArray(stepDef.alsoUntil)
+              ? stepDef.alsoUntil
+              : [stepDef.alsoUntil]
+            : [];
+          const predicates: Array<(f: unknown) => boolean> = [
+            (f) => waitFor(f, { vars }),
+            ...alsoUntilList.map((p) => (f: unknown) => p(f, { vars })),
+          ];
           const { matchedFrames, timedOut } = await waitUntilAll(
             stepDef.actor,
             predicates,
             stepDef.waitTimeoutMs ?? waitMs,
+            stepDef.alsoSplice,
           );
           step.wsReceived = matchedFrames;
           if (timedOut) {
             step.error = `timeout waiting for ack${stepDef.alsoUntil ? "+fanout" : ""} after ${stepDef.waitTimeoutMs ?? waitMs}ms`;
+          } else if (stepDef.capture) {
+            // String-pointer entries capture from the ack frame (the waitFor
+            // match); `WsCaptureRef` entries resolve post-drain (their frame
+            // may only become part of the step through the alsoSplice or the
+            // end-of-step drain) — see WsCommandStep.capture.
+            const matched = matchedFrames.find((f) => waitFor(f, { vars }));
+            for (const [varName, spec] of Object.entries(stepDef.capture)) {
+              if (typeof spec === "string") {
+                const value = jsonPointer(matched, spec);
+                if (value !== undefined) vars.set(varName, value);
+              }
+            }
           }
           break;
         }
@@ -370,6 +443,22 @@ export async function runScenario(scenario: Scenario, endpoint: Endpoint, opts: 
       await new Promise((r) => setTimeout(r, SETTLE_MS));
     }
     drainTo(step);
+    // Post-drain capture resolution (issue #27 D): a `WsCaptureRef` entry's
+    // source frame may only have joined the step through the alsoSplice or
+    // the end-of-step drain, so resolve `from`-reference captures against the
+    // FINAL wsReceived (matched + drained frames in arrival order).
+    if (stepDef.kind === "ws.command" && stepDef.capture) {
+      const frames = step.wsReceived ?? [];
+      for (const [varName, spec] of Object.entries(stepDef.capture)) {
+        if (typeof spec !== "object" || spec === null) continue;
+        const ref = spec as WsCaptureRef;
+        const found = frames.find((f) => ref.from(f, { vars }));
+        if (found !== undefined) {
+          const value = jsonPointer(found, ref.pointer);
+          if (value !== undefined) vars.set(varName, value);
+        }
+      }
+    }
     steps.push(step);
 
     // If a ws.connect failed, later ws steps for that actor are recorded as skipped.

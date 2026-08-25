@@ -123,12 +123,19 @@ defmodule LiliumChatWeb.Router do
     get "/commands/directory", ChannelCommandsController, :directory
   end
 
-  # Bot-token scope (contract §9.3): `PUT /bot/commands` authenticates with a
-  # bot token (BotAuthPlug), not the browser JWT.
+  # Bot-token scope (contract §9.3/§9.17.1): bot-token (BotAuthPlug) routes,
+  # not the browser JWT.
   scope "/api/chat", LiliumChatWeb do
     pipe_through :bot_api
 
     put "/bot/commands", BotCommandsController, :sync
+
+    # Bot channel-scoped image upload (contract §9.17.1).
+    post "/bot/channels/:channel_id/uploads/images/presign", BotUploadsController, :presign
+
+    post "/bot/channels/:channel_id/uploads/images/:attachment_id/finalize",
+         BotUploadsController,
+         :finalize
   end
 
   if Mix.env() == :test do

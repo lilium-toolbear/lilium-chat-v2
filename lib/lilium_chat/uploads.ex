@@ -160,7 +160,9 @@ defmodule LiliumChat.Uploads do
   # ------------------------------------------------------------- projection
 
   # The Browser-visible finalized-attachment projection (contract §8.2).
-  defp project_attachment(row) do
+  # Shared with `LiliumChat.BotUploads` (contract §9.17.1 uses the same
+  # `projectFinalizedAttachmentForBrowser` output in the old Worker).
+  def project_attachment(row) do
     %{
       "attachment_id" => row["attachment_id"],
       "kind" => row["kind"],
@@ -176,7 +178,10 @@ defmodule LiliumChat.Uploads do
 
   # ------------------------------------------------------------- validation
 
-  defp validate_presign_body(body) do
+  # Public so `LiliumChat.BotUploads` (contract §9.17.1) validates bot
+  # presign bodies with the exact same rules (old Worker calls the same
+  # `validatePresignBody` for bot and user presign).
+  def validate_presign_body(body) do
     filename = body["filename"] |> to_string() |> String.trim()
     mime = body["mime_type"] |> to_string() |> String.trim() |> String.downcase()
     size = body["size_bytes"]
@@ -222,7 +227,9 @@ defmodule LiliumChat.Uploads do
   # --------------------------------------------------------------- request hash
 
   # Internal dedup key (not a wire field): deterministic per logical body.
-  defp presign_request_hash(v) do
+  # Public so `LiliumChat.BotUploads` can compose its channel-scoped variant
+  # (the old Worker's bot request hash includes `channel_id`).
+  def presign_request_hash(v) do
     "filename=" <>
       v.filename <>
       "|mime=" <>

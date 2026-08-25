@@ -9,13 +9,18 @@ defmodule LiliumChat.ChannelLifecycleTest do
   `my_channels_changed` trigger set (D8: join / leave / dissolve — NOT role
   change, NOT update), the v2 `system.notice` additions, and replay
   re-projection of the new event types.
+
+  Issue #25 adds the dissolve lifecycle decisions: the role-based owner
+  gate (contract §5.4 SoT, supersedes the old Worker's `created_by` gate,
+  interacts with #12 owner transfer) and the pins / read_state retention
+  (tombstone stays readable).
   """
 
   use LiliumChat.DataCase, async: false
 
   import LiliumChatWeb.ReadFixtures
 
-  alias LiliumChat.{Channel, Errors, Query, Repo, Timeline}
+  alias LiliumChat.{Bootstrap, Channel, ChannelPins, Errors, Query, Repo, Timeline}
 
   @uid "6f1e2c3d-4a5b-7c8d-9e0f-1a2b3c4d5e6f"
   @other "7a2f3d4e-5b6c-8d9e-0f1a-2b3c4d5e6f70"
@@ -596,7 +601,7 @@ defmodule LiliumChat.ChannelLifecycleTest do
     assert Task.await(uid_topic, 5_000) == [hint]
   end
 
-  test "dissolve gates: 404 / DM / non-owner (created_by) / already-dissolved cached result" do
+  test "dissolve gates: 404 / DM / non-owner (role) / already-dissolved cached result" do
     missing = "ch-none2-" <> Ecto.UUID.generate()
 
     assert {:error, %Errors.ApiError{code: "CHANNEL_NOT_FOUND", http_status: 404}} =
@@ -609,7 +614,8 @@ defmodule LiliumChat.ChannelLifecycleTest do
     assert {:error, %Errors.ApiError{code: "UNSUPPORTED_CHANNEL_KIND", http_status: 409}} =
              Channel.dissolve(@uid, "key-g8", dm)
 
-    # dissolve owner gate uses created_by (old Worker parity), not role
+    # Owner gate (#25) consults the ACTIVE member role, not channels.created_by:
+    # a non-owner member is rejected ...
     plain = "ch-plain2-" <> Ecto.UUID.generate()
     seed_channel(plain, created_by: @other)
     seed_membership(plain, @uid, "member")
@@ -617,6 +623,21 @@ defmodule LiliumChat.ChannelLifecycleTest do
 
     assert {:error, %Errors.ApiError{code: "FORBIDDEN", http_status: 403}} =
              Channel.dissolve(@uid, "key-g9", plain)
+
+    # ... and holding created_by alone is NOT enough once the owner role has
+    # moved (the old Worker's created_by gate would have let this through).
+    stale_creator = "ch-stale-" <> Ecto.UUID.generate()
+    seed_channel(stale_creator, created_by: @uid)
+    seed_membership(stale_creator, @uid, "admin")
+    seed_membership(stale_creator, @other, "owner")
+
+    assert {:error,
+            %Errors.ApiError{
+              code: "FORBIDDEN",
+              http_status: 403,
+              message: "only owner may dissolve"
+            }} =
+             Channel.dissolve(@uid, "key-g9b", stale_creator)
 
     cid = "ch-dis3-" <> Ecto.UUID.generate()
     seed_channel(cid, status: "dissolved", created_by: @uid)
@@ -630,6 +651,117 @@ defmodule LiliumChat.ChannelLifecycleTest do
     # same-key replay → identical cached response
     {:ok, r2} = Channel.dissolve(@uid, "key-d2", cid)
     assert r2 == response
+  end
+
+  test "dissolve owner gate: the role owner dissolves even when created_by lags" do
+    # The mirror-image divergence: created_by still points at the (demoted)
+    # original creator, but the OWNER role has moved. The role gate lets the
+    # real owner through; the old Worker's created_by gate would have rejected.
+    cid = "ch-role-owner-" <> Ecto.UUID.generate()
+    seed_channel(cid, created_by: @uid)
+    seed_membership(cid, @uid, "member")
+    seed_membership(cid, @other, "owner")
+    seed_profile(@other, "Other Person", nil)
+
+    {:ok, response} = Channel.dissolve(@other, "key-role-1", cid)
+    assert response["channel"]["channel_id"] == cid
+    assert response["channel"]["status"] == "dissolved"
+
+    [dissolved, notice] = events(cid)
+    assert dissolved["event_type"] == "channel.dissolved"
+    assert dissolved["actor_id"] == @other
+    assert notice["event_type"] == "system.notice"
+    assert notice["payload"]["notice_kind"] == "channel.dissolved"
+  end
+
+  test "dissolve after owner transfer: demoted old owner loses the right, new owner dissolves" do
+    cid = "ch-xfer-dissolve-" <> Ecto.UUID.generate()
+    seed_channel(cid, created_by: @uid)
+    seed_membership(cid, @uid, "owner")
+    seed_membership(cid, @other, "admin")
+    seed_profile(@uid, "Creator", nil)
+    seed_profile(@other, "Other Person", nil)
+
+    {:ok, transfer_response} =
+      Channel.transfer_owner(@uid, "key-xfer-1", cid, %{
+        "target_user_id" => @other,
+        "previous_owner_role" => "admin"
+      })
+
+    assert transfer_response["new_owner"] == %{"user_id" => @other, "role" => "owner"}
+    assert transfer_response["previous_owner"]["user_id"] == @uid
+
+    # #12 hands created_by over in the same transaction as the role swap.
+    assert channel_row(cid)["created_by"] == @other
+
+    # The demoted old owner (admin now) already lost the right to dissolve.
+    assert {:error, %Errors.ApiError{code: "FORBIDDEN", http_status: 403}} =
+             Channel.dissolve(@uid, "key-xfer-2", cid)
+
+    # The new owner dissolves.
+    {:ok, response} = Channel.dissolve(@other, "key-xfer-3", cid)
+    assert response["channel"]["status"] == "dissolved"
+
+    # A late dissolve by the old owner hits the already-dissolved path: the
+    # status gate precedes the owner gate (old Worker parity), so ANY user
+    # re-dissolving a dissolved channel gets the 200 tombstone, not 409.
+    {:ok, late} = Channel.dissolve(@uid, "key-xfer-4", cid)
+    assert late["channel"]["status"] == "dissolved"
+  end
+
+  test "dissolve keeps channel_pins + read_state rows; the tombstone stays readable" do
+    cid = "ch-keep-" <> Ecto.UUID.generate()
+    seed_channel(cid, created_by: @uid)
+    seed_membership(cid, @uid, "owner")
+    seed_membership(cid, @other, "member")
+    seed_profile(@uid, "Creator", nil)
+    seed_profile(@other, "Other Person", nil)
+
+    # A pinned message ...
+    message_id = seed_message("msg-keep-1", cid, @other, "keep me pinned", event_id: eid(1))
+    pin_id = Ecto.UUID.generate()
+    seed_pin(pin_id, cid, message_id)
+
+    # ... and both members carry read_state cursors.
+    seed_read_state(@uid, cid, eid(3))
+    seed_read_state(@other, cid, eid(3))
+
+    {:ok, response} = Channel.dissolve(@uid, "key-keep-1", cid)
+    assert response["channel"]["status"] == "dissolved"
+
+    # The pin row survives (the top bar of a dissolved channel still renders
+    # its snapshot, contract §10.6 pin recovery).
+    [pin] = ChannelPins.list_rows(cid)
+    assert pin["pin_id"] == pin_id
+    assert pin["source_message_id"] == message_id
+
+    # The read_state cursors survive (bootstrap keeps projecting
+    # last_read_event_id for the tombstone, contract §5.4).
+    read_rows =
+      Query.rows(
+        Repo.query(
+          "SELECT user_id, last_read_event_id FROM chat_v2.read_state WHERE channel_id = $1 ORDER BY user_id",
+          [cid]
+        )
+      )
+
+    assert Enum.map(read_rows, & &1["user_id"]) == [@uid, @other]
+
+    Enum.each(read_rows, fn row -> assert row["last_read_event_id"] == eid(3) end)
+
+    # End-to-end: the tombstone is still READABLE via bootstrap — the channel
+    # lists with its read cursor and the pin snapshot intact.
+    bootstrap = Bootstrap.fetch(@uid, cid)
+
+    [summary] = Enum.filter(bootstrap["channels"], &(&1["channel_id"] == cid))
+    assert summary["status"] == "dissolved"
+    assert summary["last_read_event_id"] == eid(3)
+    assert summary["role"] == "owner"
+
+    [pin_wire] = bootstrap["channel_pins"]
+    assert pin_wire["pin_id"] == pin_id
+    assert pin_wire["source_message_id"] == message_id
+    assert pin_wire["message"]["text"] == "keep me pinned"
   end
 
   test "subsequent writes to a dissolved channel → 409 CHANNEL_DISSOLVED" do

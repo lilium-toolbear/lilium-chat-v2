@@ -29,8 +29,19 @@ defmodule LiliumChat.ChannelLifecycle do
     non-string `title` update value or a non-string, non-null `visibility`
     422s, and a missing `initial_members[].user_id` 422s (the old Worker
     crashed on the undefined INSERT).
-  * The dissolve owner gate uses `channels.created_by` (old Worker parity);
-    #12 (owner transfer) will revisit it.
+  * The dissolve owner gate is role-based (#25): the caller must hold an
+    ACTIVE `channel_members` row with `role = 'owner'` — the contract §5.4
+    owner SoT — instead of the old Worker's `channels.created_by` check.
+    #12's owner transfer hands `created_by` over in the same transaction as
+    the role swap, so the switch is behavior-preserving on every reachable
+    state; the role lookup just stops depending on that hand-off staying in
+    sync.
+  * Dissolve KEEPS `channel_pins` and `read_state` rows (#25): the tombstone
+    stays readable to current members (contract §5.4), and the old Worker
+    never deleted them either — pins live in the ChatChannel DO's own storage
+    (untouched by `dissolveChannel`), and read state lives in the
+    UserDirectory `my_channels` projection, which the dissolve outbox upserts
+    to `status='dissolved'` WITHOUT resetting `last_read_event_id`.
   * `channels.membership_version` (D8) bumps only on join/leave/dissolve:
     create seeds it at `1 + len(initial_members)`, dissolve bumps by 1,
     update leaves it unchanged.
@@ -820,9 +831,12 @@ defmodule LiliumChat.ChannelLifecycle do
 
           %{kind: :dissolved, response: response, event_frames: [], user_hints: [], seq: seq}
         else
-          # Old Worker owner gate: channels.created_by (revisited in #12
-          # once owner transfer exists).
-          if meta["created_by"] != user_id do
+          # Owner gate (#25): the contract §5.4 owner is the ACTIVE member
+          # row with role='owner' (SoT: channel_members.role) — NOT
+          # channels.created_by as in the old Worker (membership.ts:444).
+          # #12's transfer hands created_by over together with the role
+          # swap, so both forms agree on every reachable state.
+          if active_role(channel_id, user_id) != "owner" do
             Repo.rollback(%{
               kind: :error,
               error: Errors.new("FORBIDDEN", "only owner may dissolve")
@@ -831,6 +845,11 @@ defmodule LiliumChat.ChannelLifecycle do
             mv = meta["membership_version"] + 1
             affected = active_member_ids(channel_id)
             dissolved_at = Projections.format_ts(now)
+
+            # pins + read_state are intentionally NOT touched here (#25):
+            # the tombstone stays readable to current members (contract
+            # §5.4) — bootstrap keeps projecting `last_read_event_id` and
+            # `channel_pins` for the dissolved channel.
 
             Repo.query!(
               """

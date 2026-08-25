@@ -239,6 +239,59 @@ defmodule LiliumChatWeb.ReadFixtures do
     )
   end
 
+  @doc """
+  Insert a `pinned_message` pin row referencing an existing message.
+
+  `message_projection_json` is built by
+  `LiliumChat.ChannelPins.build_message_projection/4` — the same builder the
+  real pin write path uses (contract §10.6 pin recovery snapshot).
+
+  `opts`: `:pinned_by` (default: the message sender), `:priority` (default 10),
+  `:projection_id`, `:created_at`. Returns the pin_id.
+  """
+  def seed_pin(pin_id, channel_id, source_message_id, opts \\ []) do
+    row =
+      Repo.query(
+        "SELECT channel_id, sender_kind, sender_user_id, format, text, created_at FROM chat_v2.messages WHERE message_id = $1",
+        [source_message_id],
+        type: true
+      )
+      |> LiliumChat.Query.rows()
+      |> List.first()
+
+    now = Keyword.get(opts, :created_at, DateTime.utc_now())
+    projection_id = Keyword.get(opts, :projection_id) || Ecto.UUID.generate()
+    profiles = LiliumChat.Profiles.resolve([row["sender_user_id"]])
+
+    projection =
+      LiliumChat.ChannelPins.build_message_projection(row, projection_id, now, profiles)
+
+    Repo.query!(
+      """
+      INSERT INTO chat_v2.channel_pins (
+        pin_id, channel_id, pin_kind, pin_owner_kind, pin_owner_id, priority,
+        session_id, source_message_id, pinned_by_user_id, pinned_at, expires_at,
+        last_pin_event_id, message_projection_json, created_at, updated_at
+      )
+      VALUES ($1, $2, 'pinned_message', 'user', $3, $4, NULL, $5, $3, $6, NULL,
+              $7, $8, $6, $6)
+      """,
+      [
+        pin_id,
+        channel_id,
+        Keyword.get(opts, :pinned_by, row["sender_user_id"]),
+        Keyword.get(opts, :priority, 10),
+        source_message_id,
+        now,
+        Ecto.UUID.generate(),
+        Jason.encode!(projection)
+      ],
+      type: true
+    )
+
+    pin_id
+  end
+
   @doc "Insert an attachment row."
   def seed_attachment(attachment_id, opts \\ []) do
     now = DateTime.utc_now()

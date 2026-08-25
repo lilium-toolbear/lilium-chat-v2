@@ -6,8 +6,8 @@
  *
  * State reset:
  *   1. drop schema chat_v2 (direct PG connection)
- *   2. re-apply Ecto migrations via a one-shot app container
- *      (`podman compose run --rm app mix ecto.migrate`)
+ *   2. re-apply Ecto migrations inside the RUNNING app container with the
+ *      `chat_v2` prefix (pitfall documented at the call site)
  *   3. seed `public.users` profile rows for scenario actors (shared instance,
  *      also consumed by the old Worker's Hyperdrive profile resolution)
  */
@@ -75,8 +75,20 @@ export class ElixirTarget implements ConformanceTarget {
 
     // 3. Re-apply migrations inside the RUNNING container (idempotent; Ecto
     //    serializes via advisory lock, so a cold-start migration race is safe).
+    //    The Repo defaults to the `chat_v2` prefix (spec §3) — migrate with
+    //    `--prefix chat_v2` or the tables land in `public` (and a subsequent
+    //    bare `mix ecto.migrate` reports "Migrations already up" against
+    //    `public.schema_migrations` while `chat_v2` stays empty). The
+    //    create_schema task covers the schema itself (the first migration
+    //    also runs `CREATE SCHEMA IF NOT EXISTS chat_v2`).
     await this.waitContainerRunning();
-    await this.podman(["exec", "lilium_chat_app", "mix", "ecto.migrate"]);
+    await this.podman([
+      "exec",
+      "lilium_chat_app",
+      "sh",
+      "-c",
+      "mix lilium_chat.create_schema && mix ecto.migrate --prefix chat_v2",
+    ]);
 
     // 4. Seed profile rows for scenario actors (idempotent upsert).
     const seedSql = await readFile(join(CONFORMANCE_DIR, "fixtures", "seed-users.sql"), "utf8");

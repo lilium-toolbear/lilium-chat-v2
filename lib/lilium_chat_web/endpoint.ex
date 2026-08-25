@@ -15,8 +15,12 @@ defmodule LiliumChatWeb.Endpoint do
   # Subprotocol: lilium.chat.v2 + bearer.<jwt>
   # Origin: checked by transport via check_origin (CORS whitelist).
   # JWT: verified in BrowserSocket.connect/3.
+  # `path: ""` keeps the contract URL — without it Phoenix mounts the
+  # socket at "/api/chat/ws/websocket" (the websocket transport's default
+  # path fragment) and the contract URL falls through to the 404 catch-all.
   socket "/api/chat/ws", LiliumChatWeb.BrowserSocket,
     websocket: [
+      path: "",
       subprotocols: ["lilium.chat.v2"],
       check_origin: Application.compile_env(:lilium_chat, :cors, %{})[:origins] || [],
       connect_info: [:sec_websocket_headers]
@@ -27,8 +31,10 @@ defmodule LiliumChatWeb.Endpoint do
   # Token: verified in BotSocket.connect/3 (BotTokens.verify +
   # chat:runtime:connect scope). Connect failures render the contract
   # error envelope with the right HTTP status via error_handler.
+  # `path: ""` keeps the contract URL (no `/websocket` suffix).
   socket "/api/chat/bot/ws", LiliumChatWeb.BotSocket,
     websocket: [
+      path: "",
       subprotocols: [LiliumChat.BotGateway.api_version()],
       check_origin: Application.compile_env(:lilium_chat, :cors, %{})[:origins] || [],
       connect_info: [:sec_websocket_headers],

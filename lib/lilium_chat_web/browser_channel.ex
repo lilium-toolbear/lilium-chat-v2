@@ -264,9 +264,18 @@ defmodule LiliumChatWeb.BrowserChannel do
     else
       input = %{user_id: user_id, command_id: command_id, payload: payload}
 
-      case LiliumChat.Channel.invoke_command(channel_id, input) do
+      case LiliumChat.Channel.invoke_command(channel_id, input, self()) do
         {:ok, response} ->
           {:reply, {:ok, Frames.command_ack("command.invoke", command_id, response)}, socket}
+
+        # Busy invoke: the writer fanned the failure artifacts out to the
+        # OTHER sessions and returned them here — push them to this socket
+        # BEFORE the `command_error` (old Worker ordering: the fanout is
+        # synchronous within the invoke RPC, issue #27 batch D).
+        {:error, %Errors.ApiError{} = api_error, frames} ->
+          Enum.each(frames, fn frame -> push(socket, "event", frame) end)
+
+          {:reply, {:error, Frames.command_error(command_id, error_map(api_error))}, socket}
 
         {:error, %Errors.ApiError{} = api_error} ->
           {:reply, {:error, Frames.command_error(command_id, error_map(api_error))}, socket}
@@ -459,5 +468,6 @@ defmodule LiliumChatWeb.BrowserChannel do
 
   defp error_map(%Errors.ApiError{} = api_error) do
     %{code: api_error.code, message: api_error.message, retryable: api_error.retryable}
+    |> Map.merge(api_error.extra || %{})
   end
 end

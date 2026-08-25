@@ -72,17 +72,23 @@ defmodule LiliumChat.WebSockets.Frames do
   Build a `command_error` frame (server → client).
 
   `error` is a map with `:code`, `:message`, `:retryable` keys
-  (contract §2.6 error envelope).
+  (contract §2.6 error envelope). Any additional keys (e.g. the old
+  Worker's `STATEFUL_SESSION_BUSY.active_session`, issue #27 batch D) are
+  merged into the `error` object verbatim.
   """
-  def command_error(command_id, %{code: code, message: message, retryable: retryable}) do
+  def command_error(command_id, %{code: code, message: message, retryable: retryable} = error) do
+    extra =
+      error
+      |> Map.delete(:code)
+      |> Map.delete(:message)
+      |> Map.delete(:retryable)
+
     %{
       "frame_type" => "command_error",
       "command_id" => command_id,
-      "error" => %{
-        "code" => code,
-        "message" => message,
-        "retryable" => retryable
-      }
+      "error" =>
+        %{"code" => code, "message" => message, "retryable" => retryable}
+        |> Map.merge(extra)
     }
   end
 

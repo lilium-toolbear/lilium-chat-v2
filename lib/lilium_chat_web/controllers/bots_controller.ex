@@ -84,7 +84,7 @@ defmodule LiliumChatWeb.BotsController do
     identity = conn.assigns.identity
 
     result =
-      with {:ok, %{bot: bot}} <- Bots.get(bot_id),
+      with {:ok, bot} <- lookup_bot(bot_id),
            :ok <- check_owned(bot, identity.user_id) do
         {:ok, %{bot: bot}}
       end
@@ -100,7 +100,7 @@ defmodule LiliumChatWeb.BotsController do
 
     result =
       with :ok <- require_idempotency_key(conn),
-           {:ok, %{bot: bot}} <- Bots.get(bot_id),
+           {:ok, bot} <- lookup_bot(bot_id),
            :ok <- check_owned(bot, identity.user_id),
            :ok <- at_least_one_field?(body),
            :ok <- display_name_valid?(body),
@@ -121,7 +121,7 @@ defmodule LiliumChatWeb.BotsController do
 
   def list_tokens(conn, %{"bot_id" => bot_id}) do
     result =
-      with {:ok, %{bot: bot}} <- Bots.get(bot_id),
+      with {:ok, bot} <- lookup_bot(bot_id),
            :ok <- check_owned(bot, conn.assigns.identity.user_id) do
         Bots.list_tokens(bot_id)
       end
@@ -135,7 +135,7 @@ defmodule LiliumChatWeb.BotsController do
 
     result =
       with :ok <- require_idempotency_key(conn),
-           {:ok, %{bot: bot}} <- Bots.get(bot_id),
+           {:ok, bot} <- lookup_bot(bot_id),
            :ok <- check_owned(bot, identity.user_id),
            :ok <- token_name_present?(body) do
         Bots.create_token(bot_id, %{
@@ -143,6 +143,7 @@ defmodule LiliumChatWeb.BotsController do
           scopes: body["scopes"],
           expires_at: body["expires_at"]
         })
+        |> wrap_token_created()
       end
 
     respond(conn, result)
@@ -151,7 +152,7 @@ defmodule LiliumChatWeb.BotsController do
   def revoke_token(conn, %{"bot_id" => bot_id, "token_id" => token_id}) do
     result =
       with :ok <- require_idempotency_key(conn),
-           {:ok, %{bot: bot}} <- Bots.get(bot_id),
+           {:ok, bot} <- lookup_bot(bot_id),
            :ok <- check_owned(bot, conn.assigns.identity.user_id) do
         Bots.revoke_token(bot_id, token_id)
       end
@@ -160,6 +161,29 @@ defmodule LiliumChatWeb.BotsController do
   end
 
   # -- helpers -----------------------------------------------------------------
+
+  # Old Worker parity (issue #27 batch D): these routes look the bot up on
+  # the singleton BotRegistry via a DO stub RPC; a LOOKUP MISS surfaces as an
+  # untyped remote error → the worker-wide catch-all CHAT_WORKER_UNAVAILABLE
+  # (old `src/index.ts`: unknown error → `worker temporarily unavailable`),
+  # while a DELETED bot is an explicit local ApiError(BOT_NOT_FOUND) → 404
+  # (checked below). Contract §9.10/§9.11 enumerate no per-route errors, so
+  # the reference wire behavior is pinned.
+  defp lookup_bot(bot_id) do
+    case Bots.get(bot_id) do
+      {:ok, %{bot: bot}} ->
+        {:ok, bot}
+
+      {:error, _} ->
+        {:error, Errors.new("CHAT_WORKER_UNAVAILABLE", "worker temporarily unavailable")}
+    end
+  end
+
+  # Old Worker `createBotTokenHandler` answers 201 (§9.10 is silent on the
+  # status; the reference implementation wins).
+  defp wrap_token_created({:ok, %{token: token}}), do: {:ok, 201, %{token: token}}
+
+  defp wrap_token_created({:error, _} = err), do: err
 
   # Old `getOwnedBot` order: non-owner FORBIDDEN first, then deleted.
   defp check_owned(bot, user_id) do

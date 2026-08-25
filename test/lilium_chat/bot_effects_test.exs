@@ -63,8 +63,13 @@ defmodule LiliumChat.BotEffectsTest do
 
   test "validate: append_stream / finalize_stream are rejected on the main gateway" do
     for type <- ["append_stream", "finalize_stream"] do
-      assert {:error, %LiliumChat.Errors.ApiError{code: "BOT_EFFECT_INVALID"}} =
-               BotEffects.validate([%{"type" => type, "client_effect_id" => "1"}])
+      expected = "#{type} must use Stream WS"
+
+      assert {:error,
+              %LiliumChat.Errors.ApiError{
+                code: "BOT_EFFECT_INVALID",
+                message: ^expected
+              }} = BotEffects.validate([%{"type" => type, "client_effect_id" => "1"}])
     end
   end
 
@@ -316,7 +321,12 @@ defmodule LiliumChat.BotEffectsTest do
 
     assert [%{"text" => "edited"}] = rows
 
-    # A different bot's message is not updatable by this bot
+    # A different bot's message is not updatable by this bot. Seed "other-bot"
+    # as a VALID bot so the ownership check (not the bot-validity check —
+    # which fires first for an unknown bot, issue #27 batch D) is the one
+    # that rejects the update.
+    seed_bot("owner-2", bot_id: "other-bot")
+
     foreign = %{
       "type" => "update_message",
       "client_effect_id" => "up-2",

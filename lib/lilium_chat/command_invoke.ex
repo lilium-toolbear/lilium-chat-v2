@@ -17,9 +17,10 @@ defmodule LiliumChat.CommandInvoke do
   * options-validation failures → `INVALID_COMMAND_OPTIONS` (contract §11;
     the old Worker's `COMMAND_OPTIONS_INVALID` was removed from the v2.31
     normative table).
-  * blocked binding / not bound + not official → `COMMAND_NOT_FOUND`
-    (contract §11; the old Worker's 403 `COMMAND_NOT_ALLOWED` was removed
-    from the v2.31 normative table).
+  * blocked binding / not bound + not official → 403 `COMMAND_NOT_ALLOWED`
+    (old-Worker parity, command.ts:317/331; contract §11's normative table
+    lists `COMMAND_NOT_FOUND` for the absent-binding case, but the
+    conformance parity target keeps the old 403 — issue #27 batch D).
   * `command_manifest_version` is optional on the wire (the contract §9.5
     example payload omits it): when present (a number ≥ 0) it is checked
     against `channels.command_manifest_version` and a mismatch →
@@ -293,9 +294,11 @@ defmodule LiliumChat.CommandInvoke do
         current = meta["command_manifest_version"] || 0
 
         if version != current do
+          # old-Worker parity (command.ts:260): no `(current N)` suffix —
+          # contract §11 pins the code, not the message wording.
           raise Errors.new(
                   "COMMAND_MANIFEST_VERSION_STALE",
-                  "command manifest version is stale (current #{current})"
+                  "command manifest version is stale"
                 )
         end
 
@@ -370,8 +373,13 @@ defmodule LiliumChat.CommandInvoke do
     end
   end
 
+  # Blocked binding / unbound-not-official command → old-Worker parity
+  # (command.ts:317/331): 403 `COMMAND_NOT_ALLOWED` with the exact old
+  # wording (contract §11's normative table lists `COMMAND_NOT_FOUND` for
+  # the absent-binding case, but the shipping old Worker — the conformance
+  # parity target — answers COMMAND_NOT_ALLOWED on both paths; issue #27 D).
   defp not_allowed() do
-    raise Errors.new("COMMAND_NOT_FOUND", "This slash command is not allowed in this channel.")
+    raise Errors.new("COMMAND_NOT_ALLOWED", "This slash command is not allowed in this channel.")
   end
 
   # The v2.31 correctness source: the current `bot_commands` row (with
@@ -679,8 +687,20 @@ defmodule LiliumChat.CommandInvoke do
       "recalled_at" => nil
     }
 
+    # `project_message` resolves senders via `Projections.user_summary/2`,
+    # which matches RAW profiles (atom keys). `actor` is a resolved
+    # UserSummary (string keys) — re-wrap it in the raw shape so the
+    # invocation message sender resolves instead of falling back
+    # (issue #27 batch D).
+    profile = %{
+      user_id => %{
+        display_name: actor["display_name"],
+        avatar_url: actor["avatar_url"]
+      }
+    }
+
     live_message =
-      Projections.project_message(row, %{user_id => actor}, %{
+      Projections.project_message(row, profile, %{
         attachments: [],
         mentions: [],
         sticker: nil,
@@ -2093,6 +2113,9 @@ defmodule LiliumChat.CommandInvoke do
             "STATEFUL_SESSION_BUSY",
             "Another stateful command session is active in this channel."
           )
+          # old Worker `throwStatefulSessionBusy`: attach `active_session`
+          # (5-field summary with resolved `started_by`) to the error.
+          |> Errors.with_extra(%{"active_session" => active_session_summary(channel_id)})
 
         {%{kind: :session_busy, error: error, event_frames: frames}, seq2}
     end
@@ -2168,6 +2191,35 @@ defmodule LiliumChat.CommandInvoke do
   defp resolve_ttl_seconds(config, binding_max_ttl) do
     cap = binding_max_ttl || config.max_ttl_seconds
     Enum.min([config.default_ttl_seconds, cap, config.max_ttl_seconds])
+  end
+
+  # Old Worker `wireActiveSessionBusy`: the `active_session` summary attached to
+  # `STATEFUL_SESSION_BUSY` — 5 fields with a resolved `started_by`
+  # UserSummary (issue #27 batch D).
+  defp active_session_summary(channel_id) do
+    row = active_session_row(channel_id)
+
+    if is_nil(row) do
+      nil
+    else
+      command_name =
+        row["summary_json"]
+        |> Projections.json_map()
+        |> case do
+          %{"command_name" => name} when is_binary(name) -> name
+          _ -> row["bot_command_id"]
+        end
+
+      profiles = Profiles.resolve([row["started_by_user_id"]])
+
+      %{
+        "session_id" => row["session_id"],
+        "command_name" => command_name,
+        "started_by" => Projections.user_summary(row["started_by_user_id"], profiles),
+        "started_at" => Projections.format_ts(row["started_at"]),
+        "expires_at" => Projections.format_ts(row["expires_at"])
+      }
+    end
   end
 
   defp active_session_row(channel_id) do

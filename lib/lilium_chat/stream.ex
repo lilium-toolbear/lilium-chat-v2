@@ -75,13 +75,21 @@ defmodule LiliumChat.Stream do
   streaming projection (`text: ""`, `stream_state: "streaming"`, no
   event row exists for it).
   """
-  def broadcast_started(channel_id, message_id, message) when is_map(message) do
+  def broadcast_started(channel_id, _message_id, message) when is_map(message) do
+    # old Worker `buildStreamStartedFrame`: payload is `{channel_id, message}`
+    # only (no top-level `message_id` — it lives inside `message`) + a live
+    # `occurred_at` (issue #27 D). `_message_id` stays in the signature for the
+    # call sites but is not re-emitted on the frame.
     frame =
-      Frames.stream_event("message.stream_started", channel_id, %{
-        "channel_id" => channel_id,
-        "message_id" => message_id,
-        "message" => message
-      })
+      Frames.stream_event(
+        "message.stream_started",
+        channel_id,
+        %{
+          "channel_id" => channel_id,
+          "message" => message
+        },
+        occurred_at: Projections.format_ts(DateTime.utc_now())
+      )
 
     broadcast_live(channel_id, frame)
     :ok
@@ -128,6 +136,28 @@ defmodule LiliumChat.Stream do
       other -> other
     end
   end
+
+  @doc """
+  Registry lookup for the Stream WS upgrade (contract §9.15.1, old Worker
+  `streamRegistryCheck`): `{:ok, %{bot_id, status, expires_at}}` when the
+  stream resolves (live process or persisted final/abandoned row),
+  `{:error, _}` when the registry has no entry. `status` is one of
+  `"streaming"` / `"finalized"` / `"abandoned"`.
+  """
+  def lookup(channel_id, message_id) do
+    case debug_state(channel_id, message_id) do
+      %{bot_id: bot_id, status: status, expires_at: expires_at} ->
+        {:ok, %{bot_id: bot_id, status: status_name(status), expires_at: expires_at}}
+
+      other ->
+        other
+    end
+  end
+
+  defp status_name(:streaming), do: "streaming"
+  defp status_name(:finalized), do: "finalized"
+  defp status_name(:abandoned), do: "abandoned"
+  defp status_name(:expired), do: "expired"
 
   defp call(channel_id, message_id, msg, timeout \\ 5_000) do
     case pid_for(channel_id, message_id) || rehydrate_pid(channel_id, message_id) do
@@ -317,7 +347,8 @@ defmodule LiliumChat.Stream do
       ack_seq: state.ack_seq,
       received_seq: state.received_seq,
       flushed_text: state.flushed_text,
-      pending_text: state.pending_text
+      pending_text: state.pending_text,
+      expires_at: state.expires_at
     }
 
     {:reply, snapshot, state}
@@ -578,7 +609,8 @@ defmodule LiliumChat.Stream do
             "message_id" => state.message_id,
             "delta" => state.fanout_pending_text
           },
-          stream_seq: state.fanout_end_seq
+          stream_seq: state.fanout_end_seq,
+          occurred_at: Projections.format_ts(DateTime.utc_now())
         )
 
       broadcast_live(state.channel_id, frame)
@@ -653,10 +685,15 @@ defmodule LiliumChat.Stream do
 
   defp broadcast_cleanup(state) do
     frame =
-      Frames.stream_event("message.stream_abandon_cleanup", state.channel_id, %{
-        "channel_id" => state.channel_id,
-        "message_id" => state.message_id
-      })
+      Frames.stream_event(
+        "message.stream_abandon_cleanup",
+        state.channel_id,
+        %{
+          "channel_id" => state.channel_id,
+          "message_id" => state.message_id
+        },
+        occurred_at: Projections.format_ts(DateTime.utc_now())
+      )
 
     broadcast_live(state.channel_id, frame)
   end

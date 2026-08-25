@@ -432,27 +432,37 @@ defmodule LiliumChat.CommandInvokeTest do
     assert events(cid) == []
   end
 
-  test "invoke: blocked binding → COMMAND_NOT_FOUND" do
+  test "invoke: blocked binding → COMMAND_NOT_ALLOWED (old-Worker parity)" do
     cid = channel!()
     bot = new_bot()
     command_id = stateless_command(bot, "ask")
     bind!(cid, command_id, bot, status: "blocked")
     connect_bot!(bot)
 
-    assert {:error, %Errors.ApiError{code: "COMMAND_NOT_FOUND"}} =
+    assert {:error,
+            %Errors.ApiError{
+              code: "COMMAND_NOT_ALLOWED",
+              message: "This slash command is not allowed in this channel.",
+              retryable: false
+            }} =
              invoke(cid, "op-invoke-11", %{
                "bot_command_id" => command_id,
                "options" => %{"prompt" => %{"type" => "string", "value" => "x"}}
              })
   end
 
-  test "invoke: no binding + not official → COMMAND_NOT_FOUND" do
+  test "invoke: no binding + not official → COMMAND_NOT_ALLOWED (old-Worker parity)" do
     cid = channel!()
     bot = new_bot()
     command_id = stateless_command(bot, "ask")
     connect_bot!(bot)
 
-    assert {:error, %Errors.ApiError{code: "COMMAND_NOT_FOUND"}} =
+    assert {:error,
+            %Errors.ApiError{
+              code: "COMMAND_NOT_ALLOWED",
+              message: "This slash command is not allowed in this channel.",
+              retryable: false
+            }} =
              invoke(cid, "op-invoke-12", %{
                "bot_command_id" => command_id,
                "options" => %{"prompt" => %{"type" => "string", "value" => "x"}}
@@ -548,7 +558,13 @@ defmodule LiliumChat.CommandInvokeTest do
     bind!(cid, command_id, bot)
     connect_bot!(bot)
 
-    assert {:error, %Errors.ApiError{code: "COMMAND_MANIFEST_VERSION_STALE"}} =
+    # old-Worker parity (command.ts:260): the message carries no
+    # `(current N)` suffix — contract §11 pins the code, not the wording.
+    assert {:error,
+            %Errors.ApiError{
+              code: "COMMAND_MANIFEST_VERSION_STALE",
+              message: "command manifest version is stale"
+            }} =
              invoke(cid, "op-invoke-19", %{
                "bot_command_id" => command_id,
                "command_manifest_version" => 999,
@@ -983,7 +999,10 @@ defmodule LiliumChat.CommandInvokeTest do
 
     ChannelPins.upsert_session_control(cid, session["session_id"], "session_cmd", "starter")
 
-    assert {:error, %Errors.ApiError{code: "STATEFUL_SESSION_BUSY"}} =
+    # Busy invoke returns the 3-tuple `{:error, api_error, event_frames}` —
+    # the failure artifacts (invocation message + command.failed) the caller
+    # pushes to its own socket before the `command_error` (issue #27 batch D).
+    assert {:error, %Errors.ApiError{code: "STATEFUL_SESSION_BUSY"}, _frames} =
              invoke(cid, "op-state-2", %{
                "bot_command_id" => command_id,
                "options" => %{}
@@ -1036,10 +1055,12 @@ defmodule LiliumChat.CommandInvokeTest do
            ]
 
     started = payload_of(events(cid), "stateful_session.started")
-    assert started["session_id"] == session_id
-    assert started["status"] == "active"
-    assert started["command_name"] == "session_cmd"
-    assert started["started_by_user_id"] == @uid
+    # Contract-silent → old Worker shape: the payload NESTS a `session` object
+    # (issue #27 batch D) — not a flat top-level `session_id`.
+    assert started["session"]["session_id"] == session_id
+    assert started["session"]["status"] == "active"
+    assert started["session"]["command_name"] == "session_cmd"
+    assert started["session"]["started_by"]["user_id"] == @uid
 
     pin = ChannelPins.get_session_control_pin(cid)
     assert pin["pin_kind"] == "session_control"

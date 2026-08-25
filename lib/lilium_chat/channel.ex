@@ -403,10 +403,10 @@ defmodule LiliumChat.Channel do
   # --------------------------------------------------- command.invoke (#20)
 
   @doc "`command.invoke` (contract §9.5 / issue #20)."
-  def invoke_command(channel_id, input) do
+  def invoke_command(channel_id, input, caller_pid \\ nil) do
     {:ok, pid} = ensure_started(channel_id)
 
-    GenServer.call(pid, {:invoke_command, input}, 30_000)
+    GenServer.call(pid, {:invoke_command, input, caller_pid}, 30_000)
   end
 
   @doc "`session.start_ack` (issue #20): activate a `starting` session."
@@ -612,15 +612,19 @@ defmodule LiliumChat.Channel do
       end)
 
   @impl true
-  def handle_call({:invoke_command, input}, _from, state),
+  def handle_call({:invoke_command, input, caller_pid}, _from, state),
     do:
-      run_command(state, fn ->
-        CommandInvoke.invoke(state.channel_id, state.seq, %{
-          user_id: input[:user_id],
-          command_id: input[:command_id],
-          payload: input[:payload] || %{}
-        })
-      end)
+      run_command(
+        state,
+        fn ->
+          CommandInvoke.invoke(state.channel_id, state.seq, %{
+            user_id: input[:user_id],
+            command_id: input[:command_id],
+            payload: input[:payload] || %{}
+          })
+        end,
+        caller_pid
+      )
 
   @impl true
   def handle_call({:session_start_ack, input}, _from, state),
@@ -649,8 +653,8 @@ defmodule LiliumChat.Channel do
   # allocated, so the held seq is unchanged), broadcast the committed event
   # frames (in event_id order) + the user-scoped `my_channels_changed` hints,
   # and reply with the ack / response.
-  defp run_command(state, fun) do
-    {result, _new_seq, state_after} = execute(state, fun)
+  defp run_command(state, fun, caller_pid \\ nil) do
+    {result, _new_seq, state_after} = execute(state, fun, caller_pid)
 
     {:reply, to_reply(result), state_after}
   end
@@ -663,7 +667,7 @@ defmodule LiliumChat.Channel do
     {:noreply, state_after}
   end
 
-  defp execute(state, fun) do
+  defp execute(state, fun, caller_pid \\ nil) do
     {result, new_seq} =
       try do
         fun.()
@@ -672,12 +676,36 @@ defmodule LiliumChat.Channel do
           {%{kind: :error, error: api_error}, state.seq}
       end
 
-    broadcast_frames(state.channel_id, result)
+    # Busy invoke (issue #27 batch D): the old Worker fans the failure
+    # artifacts out SYNCHRONOUSLY within the invoke RPC, before the
+    # `command_error` reaches the caller — so the caller's socket sees the
+    # channel events first. Broadcast to everyone EXCEPT the caller (it
+    # receives them in the reply and pushes them itself, before the error).
+    if Map.get(result, :kind) == :session_busy and caller_pid do
+      broadcast_excluding(state.channel_id, result[:event_frames] || [], caller_pid)
+    else
+      broadcast_frames(state.channel_id, result)
+    end
+
     broadcast_user_hints(state.channel_id, result)
     push_session_frames(result)
     arm_timers(result)
 
     {result, new_seq, Map.put(state, :seq, new_seq)}
+  end
+
+  # Fanout to all live subscribers except `exclude_pid` (the busy-invoke
+  # caller, which pushes the same frames to its own socket before replying).
+  defp broadcast_excluding(channel_id, frames, exclude_pid) do
+    topic = "channel:" <> channel_id
+
+    Enum.each(frames, fn frame ->
+      LiliumChat.Observability.broadcast(
+        LiliumChat.PubSub,
+        topic,
+        {:broadcast_user, topic, frame, exclude_pid}
+      )
+    end)
   end
 
   # --------------------------------------------------------------- internals
@@ -709,7 +737,10 @@ defmodule LiliumChat.Channel do
   defp to_reply(%{kind: :session_started, response: response}), do: {:ok, response}
   defp to_reply(%{kind: :session_started_ack}), do: {:ok, %{}}
   defp to_reply(%{kind: :interaction_finalized}), do: {:ok, %{}}
-  defp to_reply(%{kind: :session_busy, error: api_error}), do: {:error, api_error}
+
+  defp to_reply(%{kind: :session_busy, error: api_error, event_frames: frames}),
+    do: {:error, api_error, frames}
+
   defp to_reply(%{kind: :closed}), do: {:ok, %{}}
   defp to_reply(%{kind: :error, error: api_error}), do: {:error, api_error}
 

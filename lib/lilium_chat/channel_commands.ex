@@ -17,6 +17,8 @@ defmodule LiliumChat.ChannelCommands do
     Errors,
     Idempotency,
     Ids,
+    Profiles,
+    Projections,
     Query,
     Repo
   }
@@ -194,7 +196,8 @@ defmodule LiliumChat.ChannelCommands do
             Repo.rollback({:gate, api_error})
 
           {:cached, response} ->
-            response
+            # Idempotent replay: no re-fanout (old Worker parity).
+            {response, nil}
 
           :missing ->
             meta =
@@ -300,17 +303,51 @@ defmodule LiliumChat.ChannelCommands do
               response
             )
 
-            response
+            # Live `command.binding_updated` fanout (contract §9.4, old
+            # Worker `commandBindingUpdate`): the wire payload carries the
+            # resolved `actor` and omits `channel_id` (a frame-level field).
+            frame =
+              Projections.build_event_frame(
+                event_id,
+                "command.binding_updated",
+                channel_id,
+                now,
+                %{
+                  "bot_id" => binding_bot_id,
+                  "bot_command_id" => bot_command_id,
+                  "binding_changes" => binding_changes,
+                  "command_manifest_delta" => manifest_delta,
+                  "actor" =>
+                    Projections.user_summary(
+                      user_id,
+                      Profiles.resolve([user_id])
+                    )
+                }
+              )
+              |> Map.put("membership_version_at_event", meta["membership_version"])
+
+            {response, frame}
         end
       end)
 
     case result do
-      {:ok, response} ->
+      {:ok, {response, frame}} ->
+        if frame do
+          broadcast_binding_updated(channel_id, frame)
+        end
+
         {:ok, response}
 
       {:error, {:gate, %Errors.ApiError{} = api_error}} ->
         {:error, api_error}
     end
+  end
+
+  # Fan the `command.binding_updated` frame out to live browser sockets
+  # (contract §9.4 / old Worker `commandBindingUpdate` live fanout).
+  defp broadcast_binding_updated(channel_id, frame) do
+    topic = "channel:" <> channel_id
+    LiliumChat.Observability.broadcast(LiliumChat.PubSub, topic, {:broadcast, topic, frame})
   end
 
   # Performs the binding row mutation; returns {binding_bot_id, after_snapshot,

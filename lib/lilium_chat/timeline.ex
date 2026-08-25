@@ -263,10 +263,16 @@ defmodule LiliumChat.Timeline do
         # from the target message's CURRENT components_json (message locator
         # only; pin-locator interactions have no message row).
         row["event_type"] == "interaction.created" ->
+          # Resolve the label FIRST (it needs the raw locator refs), then
+          # strip `component_id` / `message_id` / `pin_id` — storage keys that
+          # must not leak onto the wire (contract §9.6, issue #27 batch D).
           component_label = component_label_for(extras, payload)
 
           payload
           |> Projections.resolve_actor(profiles)
+          |> Map.delete("component_id")
+          |> Map.delete("message_id")
+          |> Map.delete("pin_id")
           |> then(fn wire ->
             if component_label do
               Map.put(wire, "component_label", component_label)
@@ -369,7 +375,19 @@ defmodule LiliumChat.Timeline do
                 extras.bot_summaries[message_row["sender_bot_id"]]
           }
 
-          %{"message" => Projections.project_message(message_row, profiles, per_message)}
+          projected = %{
+            "message" => Projections.project_message(message_row, profiles, per_message)
+          }
+
+          # `interaction.completed` / `command.completed` carry a top-level
+          # `command_id` on the wire (old Worker replay parity, issue #27
+          # batch D) — keep it; plain `message.*` payloads do not have it.
+          if event_row["event_type"] in ["interaction.completed", "command.completed"] and
+               is_binary(payload["command_id"]) do
+            Map.put(projected, "command_id", payload["command_id"])
+          else
+            projected
+          end
         end
     end
   end

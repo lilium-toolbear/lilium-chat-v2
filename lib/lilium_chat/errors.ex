@@ -28,7 +28,7 @@ defmodule LiliumChat.Errors do
     is the same value as an integer for direct rendering.
     """
 
-    defexception [:code, :message, :retryable, :http_status, :plug_status]
+    defexception [:code, :message, :retryable, :http_status, :plug_status, :extra]
 
     @impl true
     def message(%__MODULE__{message: message}), do: message
@@ -241,8 +241,18 @@ defmodule LiliumChat.Errors do
       message: message || default_message(code),
       retryable: retryable?(code),
       http_status: status,
-      plug_status: Plug.Conn.Status.reason_atom(status)
+      plug_status: Plug.Conn.Status.reason_atom(status),
+      extra: %{}
     }
+  end
+
+  @doc """
+  Attach contract-pinned extra error fields (old Worker `Object.assign(err, …)`,
+  e.g. `STATEFUL_SESSION_BUSY.active_session`). Serialised into the command_error
+  / error envelope by the web layer.
+  """
+  def with_extra(%ApiError{} = api_error, extra) when is_map(extra) do
+    %{api_error | extra: Map.merge(api_error.extra || %{}, extra)}
   end
 
   @doc """
@@ -251,11 +261,13 @@ defmodule LiliumChat.Errors do
   """
   def envelope(%ApiError{} = api_error, request_id) do
     %{
-      error: %{
-        code: api_error.code,
-        message: api_error.message,
-        retryable: api_error.retryable
-      },
+      error:
+        %{
+          code: api_error.code,
+          message: api_error.message,
+          retryable: api_error.retryable
+        }
+        |> Map.merge(api_error.extra || %{}),
       request_id: request_id
     }
   end

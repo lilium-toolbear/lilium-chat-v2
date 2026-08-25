@@ -114,6 +114,84 @@ defmodule LiliumChatWeb.BotStreamWSTest do
              )
   end
 
+  test "connect: missing write scope → old Worker scope wording parity" do
+    plaintext = seed_token(@bot, scopes: ["chat:runtime:connect"])
+    socket = %Phoenix.Socket{handler: BotStreamSocket, transport: :websocket}
+
+    assert {:error,
+            %Errors.ApiError{
+              code: "BOT_SCOPE_DENIED",
+              message: "Missing scope: chat:messages:write"
+            }} =
+             BotStreamSocket.connect(
+               %{"channel_id" => @channel, "message_id" => @mid},
+               socket,
+               %{
+                 sec_websocket_headers: [
+                   {"sec-websocket-protocol", "#{@api}, bearer.#{plaintext}"}
+                 ]
+               }
+             )
+  end
+
+  test "connect: unknown stream → BOT_STREAM_NOT_FOUND (old Worker route 404 parity)" do
+    plaintext = seed_token(@bot)
+    socket = %Phoenix.Socket{handler: BotStreamSocket, transport: :websocket}
+
+    assert {:error,
+            %Errors.ApiError{code: "BOT_STREAM_NOT_FOUND", message: "stream registry not found"}} =
+             BotStreamSocket.connect(
+               %{"channel_id" => @channel, "message_id" => "msg-sws-unknown"},
+               socket,
+               %{
+                 sec_websocket_headers: [
+                   {"sec-websocket-protocol", "#{@api}, bearer.#{plaintext}"}
+                 ]
+               }
+             )
+  end
+
+  test "connect: foreign owner → BOT_STREAM_NOT_FOUND (old Worker route 404 parity)" do
+    plaintext = seed_token(@other)
+    socket = %Phoenix.Socket{handler: BotStreamSocket, transport: :websocket}
+
+    assert {:error,
+            %Errors.ApiError{code: "BOT_STREAM_NOT_FOUND", message: "stream registry not found"}} =
+             BotStreamSocket.connect(
+               %{"channel_id" => @channel, "message_id" => @mid},
+               socket,
+               %{
+                 sec_websocket_headers: [
+                   {"sec-websocket-protocol", "#{@api}, bearer.#{plaintext}"}
+                 ]
+               }
+             )
+  end
+
+  test "connect: finalized stream → BOT_STREAM_EXPIRED (old Worker route 410 parity)" do
+    {:ok, _} =
+      Stream.finalize(@channel, @mid, %{
+        "final_seq" => 0,
+        "components" => nil,
+        "attachment_ids" => nil
+      })
+
+    plaintext = seed_token(@bot)
+    socket = %Phoenix.Socket{handler: BotStreamSocket, transport: :websocket}
+
+    assert {:error,
+            %Errors.ApiError{code: "BOT_STREAM_EXPIRED", message: "stream registry expired"}} =
+             BotStreamSocket.connect(
+               %{"channel_id" => @channel, "message_id" => @mid},
+               socket,
+               %{
+                 sec_websocket_headers: [
+                   {"sec-websocket-protocol", "#{@api}, bearer.#{plaintext}"}
+                 ]
+               }
+             )
+  end
+
   test "connect: missing token → UNAUTHORIZED" do
     socket = %Phoenix.Socket{handler: BotStreamSocket, transport: :websocket}
 

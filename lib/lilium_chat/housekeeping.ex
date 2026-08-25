@@ -48,7 +48,7 @@ defmodule LiliumChat.Housekeeping do
 
   require Logger
 
-  alias LiliumChat.{Channel, Observability, Query, Repo}
+  alias LiliumChat.{Channel, Observability, Projections, Query, Repo}
   alias LiliumChat.WebSockets.Frames
 
   def start_link(opts) do
@@ -325,10 +325,15 @@ defmodule LiliumChat.Housekeeping do
   # in-memory `LiliumChat.Stream` broadcasts.
   defp broadcast_cleanup(channel_id, message_id) do
     frame =
-      Frames.stream_event("message.stream_abandon_cleanup", channel_id, %{
-        "channel_id" => channel_id,
-        "message_id" => message_id
-      })
+      Frames.stream_event(
+        "message.stream_abandon_cleanup",
+        channel_id,
+        %{
+          "channel_id" => channel_id,
+          "message_id" => message_id
+        },
+        occurred_at: Projections.format_ts(DateTime.utc_now())
+      )
 
     topic = "channel:" <> channel_id
     Observability.broadcast(LiliumChat.PubSub, topic, {:broadcast, topic, frame})

@@ -110,6 +110,13 @@ defmodule LiliumChatWeb.BotChannel do
     end
   end
 
+  # `session.close` / `session.input_ack` / `session.start_ack` are SILENT
+  # acks (old-Worker parity, contract §9.7.4): the old Worker's
+  # BotConnection sends no bot-visible reply for them — the bot learns the
+  # outcome from server-pushed frames (`session.closed`, the
+  # `stateful_session.*` fanout, …). A Phoenix `phx_reply` here would leak
+  # the envelope onto the raw wire, because the BotSocket seam only
+  # unwraps replies whose payload is a bot frame (carries `type`).
   def handle_in("session.close", payload, socket) do
     case BotGateway.parse_session_close(payload) do
       {:ok, %{session_id: session_id, reason: reason}} ->
@@ -119,7 +126,7 @@ defmodule LiliumChatWeb.BotChannel do
           reason
         )
 
-        {:reply, {:ok, %{"status" => "ok"}}, socket}
+        {:noreply, socket}
 
       {:error, reason} ->
         Logger.debug("bot session.close rejected for #{socket.assigns[:bot_id]}: #{reason}")
@@ -131,7 +138,7 @@ defmodule LiliumChatWeb.BotChannel do
     case BotGateway.parse_session_input_ack(payload) do
       {:ok, parsed} ->
         BotConnection.deliver_session_input_ack(socket.assigns[:bot_id], parsed)
-        {:reply, {:ok, %{"status" => "ok"}}, socket}
+        {:noreply, socket}
 
       {:error, reason} ->
         Logger.debug("bot session.input_ack rejected for #{socket.assigns[:bot_id]}: #{reason}")
@@ -147,7 +154,7 @@ defmodule LiliumChatWeb.BotChannel do
     case BotGateway.parse_session_start_ack(payload) do
       {:ok, parsed} ->
         BotConnection.deliver_session_start_ack(socket.assigns[:bot_id], parsed)
-        {:reply, {:ok, %{"status" => "ok"}}, socket}
+        {:noreply, socket}
 
       {:error, reason} ->
         Logger.debug("bot session.start_ack rejected for #{socket.assigns[:bot_id]}: #{reason}")

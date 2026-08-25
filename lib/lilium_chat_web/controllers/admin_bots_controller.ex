@@ -34,7 +34,7 @@ defmodule LiliumChatWeb.AdminBotsController do
 
   def show(conn, %{"bot_id" => bot_id}) do
     result =
-      with :ok <- require_admin(conn), {:ok, %{bot: bot}} <- Bots.get(bot_id) do
+      with :ok <- require_admin(conn), {:ok, bot} <- lookup_bot(bot_id) do
         if bot["status"] == "deleted" do
           {:error, Errors.new("BOT_NOT_FOUND", "bot not found")}
         else
@@ -53,7 +53,7 @@ defmodule LiliumChatWeb.AdminBotsController do
     result =
       with :ok <- require_admin(conn),
            :ok <- require_idempotency_key(conn),
-           {:ok, %{bot: bot}} <- Bots.get(bot_id),
+           {:ok, bot} <- lookup_bot(bot_id),
            :ok <- not_deleted(bot),
            :ok <- at_least_one_field?(body),
            :ok <- display_name_valid?(body) do
@@ -74,7 +74,7 @@ defmodule LiliumChatWeb.AdminBotsController do
   def list_tokens(conn, %{"bot_id" => bot_id}) do
     result =
       with :ok <- require_admin(conn),
-           {:ok, %{bot: bot}} <- Bots.get(bot_id),
+           {:ok, bot} <- lookup_bot(bot_id),
            :ok <- not_deleted(bot) do
         Bots.list_tokens(bot_id)
       end
@@ -86,7 +86,7 @@ defmodule LiliumChatWeb.AdminBotsController do
     result =
       with :ok <- require_admin(conn),
            :ok <- require_idempotency_key(conn),
-           {:ok, %{bot: bot}} <- Bots.get(bot_id),
+           {:ok, bot} <- lookup_bot(bot_id),
            :ok <- not_deleted(bot) do
         Bots.revoke_token(bot_id, token_id)
       end
@@ -95,6 +95,21 @@ defmodule LiliumChatWeb.AdminBotsController do
   end
 
   # -- helpers -------------------------------------------------------------------
+
+  # Old Worker parity (issue #27 batch D): same DO stub RPC boundary as the
+  # developer API — a LOOKUP MISS surfaces as CHAT_WORKER_UNAVAILABLE
+  # (worker-wide catch-all, old `src/index.ts`); a DELETED bot stays
+  # BOT_NOT_FOUND 404 (checked below). Contract §9.11 enumerates no
+  # per-route errors, so the reference wire behavior is pinned.
+  defp lookup_bot(bot_id) do
+    case Bots.get(bot_id) do
+      {:ok, %{bot: bot}} ->
+        {:ok, bot}
+
+      {:error, _} ->
+        {:error, Errors.new("CHAT_WORKER_UNAVAILABLE", "worker temporarily unavailable")}
+    end
+  end
 
   defp require_admin(conn) do
     if conn.assigns.identity.is_admin do

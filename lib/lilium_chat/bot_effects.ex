@@ -78,10 +78,17 @@ defmodule LiliumChat.BotEffects do
 
         case effect["type"] do
           type when is_binary(type) ->
-            if type in BotGateway.main_gateway_effect_types() do
-              validate_type(type, effect, is_official)
-            else
-              invalid!("unsupported effect type: #{type}")
+            cond do
+              # Old Worker `validateGatewayEffects` rejects the stream
+              # effects BEFORE the allowlist with the dedicated message.
+              type in BotGateway.rejected_effect_types() ->
+                invalid!("#{type} must use Stream WS")
+
+              type in BotGateway.main_gateway_effect_types() ->
+                validate_type(type, effect, is_official)
+
+              true ->
+                invalid!("unsupported effect type: #{type}")
             end
 
           _ ->
@@ -410,9 +417,19 @@ defmodule LiliumChat.BotEffects do
   def apply_effects(channel_id, seq, bot_id, effects, opts \\ []) when is_list(effects) do
     is_official = Keyword.get(opts, :is_official, false)
 
+    # Every applier that re-projects a bot-sender message needs the resolved
+    # bot summary (`project_sender` falls back to `display_name = bot_id`
+    # otherwise — old Worker resolves the live bot profile on every
+    # message.created / message.updated / interaction.completed projection).
     needs_summary? =
       Enum.any?(effects, fn effect ->
-        effect["type"] in ["send_message", "start_stream", "set_channel_pin"]
+        effect["type"] in [
+          "send_message",
+          "update_message",
+          "disable_components",
+          "start_stream",
+          "set_channel_pin"
+        ]
       end)
 
     summary = if needs_summary?, do: bot_summary(bot_id), else: nil
@@ -693,7 +710,18 @@ defmodule LiliumChat.BotEffects do
     end
 
     row =
-      synthetic_row(message_id, channel_id, bot_id, type, format, "normal", text, reply_to, now)
+      synthetic_row(
+        message_id,
+        effect["client_effect_id"],
+        channel_id,
+        bot_id,
+        type,
+        format,
+        "normal",
+        text,
+        reply_to,
+        now
+      )
 
     live_message =
       Projections.project_message(row, %{}, %{
@@ -947,6 +975,7 @@ defmodule LiliumChat.BotEffects do
     row =
       synthetic_row(
         message_id,
+        effect["client_effect_id"],
         channel_id,
         bot_id,
         message["type"] || "text",
@@ -1060,6 +1089,7 @@ defmodule LiliumChat.BotEffects do
   # The synthetic row `Projections.project_message/3` reads (bot sender).
   defp synthetic_row(
          message_id,
+         command_id,
          channel_id,
          bot_id,
          type,
@@ -1071,7 +1101,7 @@ defmodule LiliumChat.BotEffects do
        ) do
     %{
       "message_id" => message_id,
-      "command_id" => nil,
+      "command_id" => command_id,
       "channel_id" => channel_id,
       "sender_kind" => "bot",
       "sender_user_id" => nil,

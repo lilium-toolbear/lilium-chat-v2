@@ -619,7 +619,9 @@ defmodule LiliumChat.StatefulSessions do
       "command_name" => summary["command_name"] || session["bot_command_id"],
       "status" => new_status,
       "reason" => reason,
-      "closed_at" => Projections.format_ts(now)
+      "closed_at" => Projections.format_ts(now),
+      # old Worker `closeStatefulSession` persists `actor: null` on the wire
+      "actor" => nil
     }
 
     {:ok, _} =
@@ -1185,7 +1187,15 @@ defmodule LiliumChat.StatefulSessions do
   # (message locator only — pin-locator interactions have no message row),
   # matching what the read path re-projects on replay (§9.6.2).
   defp interaction_created_wire(persisted, user_id, attrs) do
-    wire = Projections.resolve_actor(persisted, Profiles.resolve([user_id]))
+    # The raw locator refs (`component_id` / `message_id` / `pin_id`) are
+    # storage keys — the wire keeps only the resolved payload (contract §9.6,
+    # issue #27 batch D).
+    wire =
+      persisted
+      |> Projections.resolve_actor(Profiles.resolve([user_id]))
+      |> Map.delete("component_id")
+      |> Map.delete("message_id")
+      |> Map.delete("pin_id")
 
     case attrs[:message_row] do
       %{"components_json" => components_json} ->
@@ -1459,19 +1469,29 @@ defmodule LiliumChat.StatefulSessions do
     now_ms = DateTime.to_unix(now, :millisecond)
     summary = Projections.json_map(session["summary_json"]) || %{}
     command_name = summary["command_name"] || session["bot_command_id"]
-    started_by_display_name = summary["started_by_display_name"] || session["started_by_user_id"]
+
+    # Resolve the starter profile once: the `stateful_session.started` wire
+    # nests a resolved `started_by` UserSummary (contract-silent → old Worker
+    # shape, issue #27 batch D) and the session_control pin text shows the
+    # resolved display name (`由 @<name> 发起`).
+    profiles = Profiles.resolve([session["started_by_user_id"]])
+    started_by = Projections.user_summary(session["started_by_user_id"], profiles)
+    started_by_display_name = started_by["display_name"]
 
     {started_event_id, seq1} = Ids.monotonic_uuidv7(seq, now_ms)
     {pin_event_id, seq2} = Ids.monotonic_uuidv7(seq1, now_ms + 1)
 
     started_payload = %{
-      "session_id" => session["session_id"],
-      "bot_command_id" => session["bot_command_id"],
-      "command_name" => command_name,
-      "status" => "active",
-      "started_by_user_id" => session["started_by_user_id"],
-      "started_at" => Projections.format_ts(session["started_at"]),
-      "expires_at" => Projections.format_ts(session["expires_at"])
+      "actor" => nil,
+      "session" => %{
+        "session_id" => session["session_id"],
+        "bot_command_id" => session["bot_command_id"],
+        "command_name" => command_name,
+        "status" => "active",
+        "started_at" => Projections.format_ts(session["started_at"]),
+        "expires_at" => Projections.format_ts(session["expires_at"]),
+        "started_by" => started_by
+      }
     }
 
     {:ok, _} =
@@ -1724,13 +1744,13 @@ defmodule LiliumChat.StatefulSessions do
   defp project_message_full(nil), do: nil
 
   defp project_message_full(row) do
+    # The messages table stores only `sender_bot_id` — resolve the live bot
+    # profile for the display name / avatar (old Worker resolves the bot
+    # summary on every interaction.completed projection, issue #27 batch D).
     bot_summary =
       if row["sender_bot_id"] do
-        %{
-          "bot_id" => row["sender_bot_id"],
-          "display_name" => row["sender_bot_display_name"],
-          "avatar_url" => row["sender_bot_avatar_url"]
-        }
+        BotEffects.bot_summary(row["sender_bot_id"]) ||
+          %{"display_name" => row["sender_bot_id"], "avatar_url" => nil}
       end
 
     Projections.project_message(row, %{}, %{

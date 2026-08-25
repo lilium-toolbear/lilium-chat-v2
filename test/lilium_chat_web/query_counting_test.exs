@@ -116,27 +116,60 @@ defmodule LiliumChatWeb.QueryCountingTest do
 
   @tag :pg_stat_statements
   test "GET /api/chat/channels executes zero write statements (pg_stat_statements oracle)" do
-    # Small cross-test window: other async tests sharing this database could
-    # in principle execute a statement between reset and read. Tagged so the
-    # test can be excluded (--exclude pg_stat_statements) if that ever flakes.
-    Ecto.Adapters.SQL.query!(Repo, "SELECT pg_stat_statements_reset()", [])
-
-    conn = request(:get, "/api/chat/channels", auth_headers())
-    assert conn.status == 200
-
+    # Cross-test window: other ASYNC tests sharing this database execute
+    # statements between this test's reset and read (since batch D the
+    # observed polluters are bot fixture INSERTs — bot_apps / bot_tokens /
+    # channels rows seeded by concurrent tests landing while the oracle
+    # sleeps). The oracle is therefore RETRY-tolerant: up to 3 attempts,
+    # each one resetting pg_stat_statements, quiescing for a short fixed
+    # interval, repeating the SAME read request, and re-checking the
+    # statement log. A concurrent seeder's write only pollutes the attempt
+    # it lands in; the test passes as soon as one attempt is clean and
+    # fails only when EVERY attempt observed writes (the assertion shows
+    # which statements were seen).
+    #
     # PG 18 dropped the `database` column from pg_stat_statements — each
     # database only ever lists its own statements.
-    {:ok, %{rows: rows}} =
-      Ecto.Adapters.SQL.query(Repo, "SELECT query FROM pg_stat_statements", [])
+    # Tagged so the test can be excluded (--exclude pg_stat_statements) if
+    # it ever still flakes under extreme concurrency.
+    outcome =
+      Enum.reduce_while(1..3, %{attempts: 0, seen: [], clean: false}, fn _, acc ->
+        Ecto.Adapters.SQL.query!(Repo, "SELECT pg_stat_statements_reset()", [])
 
-    writes =
-      for [query_text] <- rows,
-          not String.contains?(query_text, "pg_stat_statements"),
-          QueryCounter.classify(query_text) == :write do
-        query_text
-      end
+        # Quiescence: let in-flight statements from concurrent tests settle
+        # before the read, so this attempt samples a quiet moment.
+        Process.sleep(150)
 
-    assert writes == []
+        conn = request(:get, "/api/chat/channels", auth_headers())
+        assert conn.status == 200
+
+        {:ok, %{rows: rows}} =
+          Ecto.Adapters.SQL.query(Repo, "SELECT query FROM pg_stat_statements", [])
+
+        observed =
+          for [query_text] <- rows,
+              not String.contains?(query_text, "pg_stat_statements"),
+              QueryCounter.classify(query_text) == :write do
+            query_text
+          end
+
+        next = %{
+          acc
+          | attempts: acc.attempts + 1,
+            seen: acc.seen ++ observed,
+            clean: acc.clean or observed == []
+        }
+
+        if next.clean do
+          {:halt, next}
+        else
+          {:cont, next}
+        end
+      end)
+
+    assert outcome.clean,
+           "expected zero write statements for GET /api/chat/channels, but " <>
+             "all #{outcome.attempts} oracle attempts observed writes: #{inspect(outcome.seen)}"
   end
 
   defp extension_available? do

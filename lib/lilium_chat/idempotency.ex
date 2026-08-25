@@ -174,12 +174,40 @@ defmodule LiliumChat.Idempotency do
     # binary form, not the hyphenated string.
     id = Ecto.UUID.bingenerate()
 
+    # `check/5` treats a row as dead once `expires_at <= now()`, but the
+    # leftover row still holds the per-namespace unique key until Housekeeping
+    # reaps it (spec §3.3.2). A plain INSERT would then collide with
+    # `uniq_chat_v2_idem_user_command` and raise a non-ApiError
+    # `UniqueConstraintError` in the caller's transaction (issue #23).
+    # `ON CONFLICT ... DO UPDATE` overwrites the leftover in place instead of
+    # crashing: first-seen `created_at` is preserved, the TTL is refreshed, and
+    # the fresh write's status/hash/response win — which is exactly the
+    # replay/conflict semantics `check/5` already promises. The conflict
+    # target mirrors the partial unique index (spec D10).
+    #
+    # The DO UPDATE guard only overwrites rows that are STILL dead by
+    # `check/5`'s predicate (`expires_at <= now()`) at commit time. A live
+    # conflicting row can only be a concurrent same-key writer that committed
+    # between this transaction's `check/5` and the INSERT (both read
+    # `:missing`); its fresh row must survive, so the update is a no-op and
+    # the winner's recorded ack wins replays. (Full same-key serialization
+    # would need row locking — out of scope here; pre-fix this race crashed
+    # the writer instead of resolving.)
     Repo.query!(
       """
       INSERT INTO chat_v2.idempotency
         (id, namespace, principal_kind, principal_id, operation, operation_id,
          status, request_hash, response_json, created_at, updated_at, expires_at)
       VALUES ($1, 'user_command', $2, $3, $4, $5, 'completed', $6, $7, $8, $8, $9)
+      ON CONFLICT (principal_kind, principal_id, operation, operation_id)
+        WHERE namespace = 'user_command'
+      DO UPDATE SET
+        status = 'completed',
+        request_hash = EXCLUDED.request_hash,
+        response_json = EXCLUDED.response_json,
+        updated_at = EXCLUDED.updated_at,
+        expires_at = EXCLUDED.expires_at
+      WHERE chat_v2.idempotency.expires_at <= now()
       """,
       [
         id,

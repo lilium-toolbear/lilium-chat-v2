@@ -132,16 +132,27 @@ defmodule LiliumChat.Invites do
     end
   end
 
-  # The old Worker rejects the invite when it is revoked or its expires_at is
-  # at or before now (`Date.parse(expires_at) <= Date.now()`).
-  #
-  # NOTE: `expires_at` decodes as %NaiveDateTime{} (`:utc_datetime_usec`);
-  # Elixir's cross-type `>` between NaiveDateTime and DateTime is NOT an
-  # instant comparison, so compare like types (the stored wall time is UTC).
-  defp invite_active?(row, now) do
+  @doc """
+  Invite-row liveness (shared by the read path `preview/2` and the write
+  path `LiliumChat.InviteCommands`): the row is live when it is not revoked
+  and its `expires_at` is still in the future.
+
+  The old Worker rejects the invite when it is revoked or its expires_at is
+  at or before now (`Date.parse(expires_at) <= Date.now()`).
+
+  NOTE: `expires_at` decodes as %NaiveDateTime{} (`:utc_datetime_usec`);
+  Elixir's cross-type `>` between NaiveDateTime and DateTime is NOT an
+  instant comparison, so compare like types (the stored wall time is UTC).
+  And `>` on two structs is a STRUCTURAL (key-ordered) comparison, not a
+  chronological one — it would compare `day` before `month`/`year`, so an
+  invite expiring on the 1st of a later month could be judged "expired"
+  while the 25th of the current month is still live. Use the semantic
+  `NaiveDateTime.compare/2` instead.
+  """
+  def invite_active?(row, now) do
     is_nil(row["revoked_at"]) and
       is_struct(row["expires_at"], NaiveDateTime) and
-      row["expires_at"] > DateTime.to_naive(now)
+      NaiveDateTime.compare(row["expires_at"], DateTime.to_naive(now)) == :gt
   end
 
   defp sample_member_ids(channel_id) do

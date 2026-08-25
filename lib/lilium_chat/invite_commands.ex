@@ -52,6 +52,7 @@ defmodule LiliumChat.InviteCommands do
     Errors,
     Idempotency,
     Ids,
+    Invites,
     Profiles,
     Projections,
     Query,
@@ -331,7 +332,7 @@ defmodule LiliumChat.InviteCommands do
       invite == nil or invite["invite_code"] != invite_code ->
         Repo.rollback(%{kind: :error, error: Errors.new("INVITE_NOT_FOUND", "invite not found")})
 
-      not invite_active?(invite, now) ->
+      not Invites.invite_active?(invite, now) ->
         Repo.rollback(%{kind: :error, error: Errors.new("INVITE_NOT_FOUND", "invite not found")})
 
       true ->
@@ -521,14 +522,5 @@ defmodule LiliumChat.InviteCommands do
       )
     )
     |> List.first()
-  end
-
-  # Old Worker: expired (`expires_at <= now`) or revoked → not found.
-  # `expires_at` decodes as %NaiveDateTime{} (`:utc_datetime_usec`); compare
-  # like types (the stored wall time is UTC).
-  defp invite_active?(row, now) do
-    is_nil(row["revoked_at"]) and
-      is_struct(row["expires_at"], NaiveDateTime) and
-      row["expires_at"] > DateTime.to_naive(now)
   end
 end

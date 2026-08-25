@@ -225,7 +225,15 @@ defmodule LiliumChat.Bootstrap do
           AND m.status NOT IN ('deleted', 'recalled')
         ORDER BY m.created_at DESC, m.message_id DESC
         LIMIT 1
-      ) AS last_message_sender_id
+      ) AS last_message_sender_id,
+      (
+        SELECT cm2.user_id
+        FROM chat_v2.channel_members cm2
+        WHERE cm2.channel_id = cm.channel_id
+          AND cm2.user_id <> cm.user_id
+          AND cm2.status = 'active'
+        LIMIT 1
+      ) AS dm_peer_user_id
     FROM chat_v2.channel_members cm
     JOIN chat_v2.channels c ON c.channel_id = cm.channel_id
     LEFT JOIN chat_v2.read_state rs
@@ -348,15 +356,15 @@ defmodule LiliumChat.Bootstrap do
     end)
   end
 
-  defp build_dm_summary(base, _row, _profiles) do
-    # DM channels: title = peer's display name, avatar = peer's avatar.
-    # For the tracer bullet, dm_peer resolution is deferred to Phase 1
-    # (requires dm_pairs join + additional profile lookup).
-    Map.put(base, "dm_peer", nil)
+  defp build_dm_summary(base, row, profiles) do
+    # DM channels: summary title/avatar resolve to the peer, and dm_peer
+    # carries the peer UserSummary (contract §3.2) — same projection as the
+    # channel list (LiliumChat.Channels.with_dm_peer, issue #27).
+    with_dm_peer(base, row["dm_peer_user_id"], profiles)
   end
 
-  defp build_active_channel_detail(row, _profiles) do
-    %{
+  defp build_active_channel_detail(row, profiles) do
+    detail = %{
       "channel_id" => row["channel_id"],
       "kind" => row["kind"],
       "visibility" => row["visibility"],
@@ -369,6 +377,40 @@ defmodule LiliumChat.Bootstrap do
       "created_at" => format_ts(row["created_at"]),
       "updated_at" => format_ts(row["updated_at"])
     }
+
+    # The old Worker's bootstrap `active_channel` is the inflated list entry,
+    # so DM peers resolve here too (contract §3.2 / §4.1).
+    if row["kind"] == "dm" do
+      with_dm_peer(detail, row["dm_peer_user_id"], profiles)
+    else
+      detail
+    end
+  end
+
+  # Mirrors LiliumChat.Channels.with_dm_peer/3 (issue #27): the peer's
+  # UserSummary plus the peer-derived title/avatar.
+  defp with_dm_peer(summary, dm_peer_user_id, profiles) do
+    case dm_peer_user_id do
+      nil ->
+        summary
+
+      peer_id ->
+        profile = Map.get(profiles, peer_id)
+
+        display_name =
+          (profile && profile[:display_name]) || fallback_display_name(peer_id)
+
+        avatar = profile && profile[:avatar_url]
+
+        summary
+        |> Map.put("dm_peer", %{
+          "user_id" => peer_id,
+          "display_name" => display_name,
+          "avatar_url" => avatar
+        })
+        |> Map.put("title", display_name)
+        |> Map.put("avatar_url", avatar)
+    end
   end
 
   defp build_preview(row, profiles) do
@@ -415,7 +457,14 @@ defmodule LiliumChat.Bootstrap do
         row["pinned_by_user_id"]
       end
 
-    [user_id | sender_ids] ++ pin_owner_ids
+    dm_peer_ids =
+      for row <- channel_rows,
+          row["kind"] == "dm",
+          not is_nil(row["dm_peer_user_id"]) do
+        row["dm_peer_user_id"]
+      end
+
+    [user_id | sender_ids] ++ pin_owner_ids ++ dm_peer_ids
   end
 
   defp fallback_display_name(user_id) do

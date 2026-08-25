@@ -37,7 +37,10 @@ defmodule LiliumChat.Invites do
   Raises `Errors.ApiError` (INVITE_NOT_FOUND).
   """
   def preview(user_id, invite_code) do
-    row = invite_row(invite_code) || raise(Errors.new("INVITE_NOT_FOUND"))
+    # Old-Worker wordings (lilium-chat previewInviteHandler +
+    # ChatChannel.getInvite): missing row / missing channel → "invite not
+    # found"; revoked / expired → "invite expired or revoked".
+    row = invite_row(invite_code) || raise(Errors.new("INVITE_NOT_FOUND", "invite not found"))
 
     now = DateTime.utc_now()
 
@@ -46,7 +49,7 @@ defmodule LiliumChat.Invites do
     end
 
     channel =
-      row["channel"] || raise(Errors.new("INVITE_NOT_FOUND"))
+      row["channel"] || raise(Errors.new("INVITE_NOT_FOUND", "invite not found"))
 
     channel_id = channel["channel_id"]
     sample_ids = sample_member_ids(channel_id)

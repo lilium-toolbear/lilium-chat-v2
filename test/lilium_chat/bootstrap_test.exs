@@ -207,6 +207,35 @@ defmodule LiliumChat.BootstrapTest do
     assert result["channel_pins"] == []
   end
 
+  test "DM channel: dm_peer + resolved title/avatar in channels[] and active_channel" do
+    seed_channel(@ch1, "", "dm")
+    seed_membership(@ch1, @user_id, "member")
+    seed_membership(@ch1, @other_user, "member")
+    seed_user_profile(@other_user, "Bob Profile", "https://example.com/b.png")
+
+    result = Bootstrap.fetch(@user_id, @ch1)
+
+    peer = %{
+      "user_id" => @other_user,
+      "display_name" => "Bob Profile",
+      "avatar_url" => "https://example.com/b.png"
+    }
+
+    ch = List.first(result["channels"])
+    assert ch["channel_id"] == @ch1
+    assert ch["dm_peer"] == peer
+    assert ch["title"] == "Bob Profile"
+    assert ch["avatar_url"] == "https://example.com/b.png"
+
+    # The old Worker's `active_channel` is the inflated list entry — it
+    # carries the DM peer projection too (contract §3.2 DM ChannelSummary).
+    active = result["active_channel"]
+    assert active["channel_id"] == @ch1
+    assert active["dm_peer"] == peer
+    assert active["title"] == "Bob Profile"
+    assert active["avatar_url"] == "https://example.com/b.png"
+  end
+
   test "read-only: no write statements in populated bootstrap (A12)" do
     seed_channel(@ch1, "General", "channel")
     seed_membership(@ch1, @user_id, "member")

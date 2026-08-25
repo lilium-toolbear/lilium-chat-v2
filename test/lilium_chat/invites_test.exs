@@ -91,9 +91,36 @@ defmodule LiliumChat.InvitesTest do
 
     seed_invite("inv_orphan", "99999999-0000-7000-8000-999999999999", created_by: @u1)
 
-    for code <- ["inv_nope", "inv_revoked", "inv_expired", "inv_orphan"] do
-      assert_error(fn -> Invites.preview(@viewer, code) end, "INVITE_NOT_FOUND", 404)
-    end
+    # Old-Worker reference wordings (lilium-chat previewInviteHandler +
+    # ChatChannel.getInvite): missing row / missing channel say "invite not
+    # found"; revoked / expired say "invite expired or revoked".
+    assert_error(
+      fn -> Invites.preview(@viewer, "inv_nope") end,
+      "INVITE_NOT_FOUND",
+      404,
+      "invite not found"
+    )
+
+    assert_error(
+      fn -> Invites.preview(@viewer, "inv_revoked") end,
+      "INVITE_NOT_FOUND",
+      404,
+      "invite expired or revoked"
+    )
+
+    assert_error(
+      fn -> Invites.preview(@viewer, "inv_expired") end,
+      "INVITE_NOT_FOUND",
+      404,
+      "invite expired or revoked"
+    )
+
+    assert_error(
+      fn -> Invites.preview(@viewer, "inv_orphan") end,
+      "INVITE_NOT_FOUND",
+      404,
+      "invite not found"
+    )
   end
 
   test "preview is read-only and bounded (A12)" do
@@ -118,7 +145,7 @@ defmodule LiliumChat.InvitesTest do
 
   # ---------------------------------------------------------------- helpers
 
-  defp assert_error(fun, code, http_status) do
+  defp assert_error(fun, code, http_status, message) do
     try do
       fun.()
       flunk("expected #{code}")
@@ -126,6 +153,7 @@ defmodule LiliumChat.InvitesTest do
       :error, e ->
         assert e.code == code
         assert e.http_status == http_status
+        assert e.message == message
     end
   end
 end

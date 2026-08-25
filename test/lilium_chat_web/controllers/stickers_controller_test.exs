@@ -232,12 +232,15 @@ defmodule LiliumChatWeb.StickersControllerTest do
     assert body_json(conn2)["error"]["code"] == "IDEMPOTENCY_CONFLICT"
   end
 
-  test "DELETE /stickers/:sticker_id: another user's sticker → 403 FORBIDDEN" do
+  test "DELETE /stickers/:sticker_id: another user's sticker → idempotent no-op (Worker parity)" do
+    # Contract §8.3: sticker_id 跨用户不稳定 + 重复删除幂等; the old Worker's
+    # per-DO storage makes a foreign sticker_id a plain no-op success.
     sticker_id = save_via_endpoint(@uid2, "att-del-web-4", "web-stk-d4")
     headers = auth_headers(@uid, [{"origin", @origin}, {"idempotency-key", "web-stk-d4-del"}])
     conn = request(:delete, "/api/chat/stickers/#{sticker_id}", headers, nil)
-    assert conn.status == 403
-    assert body_json(conn)["error"]["code"] == "FORBIDDEN"
+    assert conn.status == 200
+    assert body_json(conn)["deleted"] == true
+    assert body_json(conn)["sticker_id"] == sticker_id
   end
 
   test "DELETE /stickers/:sticker_id: no auth → 401 UNAUTHORIZED" do

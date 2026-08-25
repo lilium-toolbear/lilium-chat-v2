@@ -264,7 +264,12 @@ defmodule LiliumChat.Projections do
 
   @doc "Format a timestamp column (DateTime / NaiveDateTime / ISO string / nil)."
   def format_ts(nil), do: nil
-  def format_ts(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+
+  # Contract §2.3: all time fields are ISO 8601 UTC with an explicit
+  # `Z` designator (old Worker parity).
+  def format_ts(%DateTime{} = dt) do
+    iso_z(DateTime.to_iso8601(dt))
+  end
 
   # Naive `timestamp` columns (this schema stores UTC without a zone) decode as
   # %NaiveDateTime{}. The wall time IS UTC, so suffix `Z` — matching the
@@ -272,6 +277,19 @@ defmodule LiliumChat.Projections do
   def format_ts(%NaiveDateTime{} = ndt), do: NaiveDateTime.to_iso8601(ndt) <> "Z"
 
   def format_ts(value), do: value
+
+  @doc """
+  Ensure an ISO-8601 timestamp carries an explicit UTC designator (contract
+  §2.3). `DateTime.to_iso8601/1` may omit the `Z` for UTC values depending on
+  the Elixir version; append it when no designator/offset is present.
+  """
+  def iso_z(iso) when is_binary(iso) do
+    if Regex.match?(~r/(Z|[+-]\d{2}:\d{2})$/, iso) do
+      iso
+    else
+      iso <> "Z"
+    end
+  end
 
   @doc """
   Build a channel `last_message_preview` (`"DisplayName: text"`, contract §3.2).

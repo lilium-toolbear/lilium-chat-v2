@@ -9,21 +9,22 @@ defmodule LiliumChat.Bootstrap do
   1. **Main channel list** — `channel_members` ⋈ `channels` ⋈ `read_state`
      with per-channel aggregate subqueries (last_event_id, last message,
      unread count). One query.
-  2. **Messages** — last 50 active messages for the active channel. One query.
+  2. **Messages** — the active channel's timeline via `LiliumChat.Timeline.messages_page/3`
+      (same projection as `GET /channels/{id}/messages`, §6.1 — the old
+      Worker's bootstrap first screen is the channel timeline, issue #27).
   3. **Channel pins** — active pins for the active channel. One query.
   4. **Command manifest** — bound commands for the active channel (only when
      `?channel_id=` was explicitly requested). One query.
   5. **Profile batch** — `public.users` lookup, batch 50 (D16, A10).
 
-  Total: ≤ 6 PG round-trips (5 queries + 1 profile batch), regardless of
-  channel count. Zero per-channel backend fan-out (A12/D15).
+  Total: ≤ 11 PG round-trips regardless of channel count (main list,
+  timeline page + its relation/profile batches, pins, command manifest, profile batch). Zero per-channel backend fan-out (A12/D15).
   Reads are strictly read-only (no hidden writes).
   """
 
-  alias LiliumChat.{ChannelCommands, ChannelPins, Ids, Repo}
+  alias LiliumChat.{ChannelCommands, ChannelPins, Ids, Projections, Repo, Timeline}
 
   @profile_batch_size 50
-  @bootstrap_message_limit 50
 
   # ------------------------------------------------------------------ types
 
@@ -76,14 +77,20 @@ defmodule LiliumChat.Bootstrap do
           Enum.find(channel_rows, fn row -> row["channel_id"] == cid end)
       end
 
-    # 3. Messages for active channel (one query)
+    # 3. Messages for active channel — the SAME timeline projection as
+    #    `GET /channels/{id}/messages` (§6.1): the old Worker's bootstrap
+    #    first screen is the channel timeline (event frames), not a raw
+    #    messages-table page (parity with the messages endpoint, issue #27).
     messages =
       case active_channel do
         nil ->
           %{"items" => [], "next_cursor" => nil}
 
         row ->
-          query_messages(row["channel_id"])
+          %{items: items, next_cursor: cursor} =
+            Timeline.messages_page(user_id, row["channel_id"], %{"limit" => "50"})
+
+          %{"items" => items, "next_cursor" => cursor}
       end
 
     # 4. Channel pins for active channel (one query; DM → []). Rows are
@@ -199,24 +206,24 @@ defmodule LiliumChat.Bootstrap do
         SELECT m.text
         FROM chat_v2.messages m
         WHERE m.channel_id = cm.channel_id
-          AND m.status = 'active'
-        ORDER BY m.created_at DESC
+          AND m.status NOT IN ('deleted', 'recalled')
+        ORDER BY m.created_at DESC, m.message_id DESC
         LIMIT 1
       ) AS last_message_text,
       (
         SELECT m.created_at
         FROM chat_v2.messages m
         WHERE m.channel_id = cm.channel_id
-          AND m.status = 'active'
-        ORDER BY m.created_at DESC
+          AND m.status NOT IN ('deleted', 'recalled')
+        ORDER BY m.created_at DESC, m.message_id DESC
         LIMIT 1
       ) AS last_message_at,
       (
         SELECT m.sender_user_id
         FROM chat_v2.messages m
         WHERE m.channel_id = cm.channel_id
-          AND m.status = 'active'
-        ORDER BY m.created_at DESC
+          AND m.status NOT IN ('deleted', 'recalled')
+        ORDER BY m.created_at DESC, m.message_id DESC
         LIMIT 1
       ) AS last_message_sender_id
     FROM chat_v2.channel_members cm
@@ -231,48 +238,6 @@ defmodule LiliumChat.Bootstrap do
     case Repo.query(query, [user_id], type: true) do
       {:ok, result} -> rows_to_maps(result)
       {:error, _} -> []
-    end
-  end
-
-  @doc """
-  Query the last N active messages for a channel (one SQL query).
-  Returns `{items: [...], next_cursor: nil}`.
-  """
-  def query_messages(channel_id) do
-    query = """
-    SELECT
-      m.message_id,
-      m.command_id,
-      m.channel_id,
-      m.sender_kind,
-      m.sender_user_id,
-      m.sender_bot_id,
-      m.type,
-      m.format,
-      m.status,
-      m.text,
-      m.reply_to,
-      m.reply_snapshot_json,
-      m.stream_state,
-      m.created_at,
-      m.updated_at,
-      m.edited_at,
-      m.deleted_at,
-      m.recalled_at
-    FROM chat_v2.messages m
-    WHERE m.channel_id = $1
-      AND m.status = 'active'
-    ORDER BY m.event_id DESC
-    LIMIT $2
-    """
-
-    case Repo.query(query, [channel_id, @bootstrap_message_limit], type: true) do
-      {:ok, result} ->
-        items = rows_to_maps(result) |> Enum.reverse() |> Enum.map(&project_message/1)
-        %{"items" => items, "next_cursor" => nil}
-
-      {:error, _} ->
-        %{"items" => [], "next_cursor" => nil}
     end
   end
 
@@ -458,65 +423,9 @@ defmodule LiliumChat.Bootstrap do
     "user-" <> String.slice(String.downcase(user_id), 0, 8)
   end
 
-  defp format_ts(nil), do: nil
-
-  defp format_ts(%DateTime{} = dt) do
-    DateTime.to_iso8601(dt)
-  end
-
-  defp format_ts(value), do: value
-
-  # ------------------------------------------------------- message projection
-
-  defp project_message(row) do
-    sender =
-      case row["sender_kind"] do
-        "user" ->
-          %{
-            "kind" => "user",
-            "user" => %{
-              "user_id" => row["sender_user_id"],
-              "display_name" => fallback_display_name(row["sender_user_id"]),
-              "avatar_url" => nil
-            }
-          }
-
-        "bot" ->
-          %{
-            "kind" => "bot",
-            "bot" => %{
-              "bot_id" => row["sender_bot_id"],
-              "display_name" => "bot"
-            }
-          }
-
-        other ->
-          %{"kind" => other}
-      end
-
-    %{
-      "message_id" => row["message_id"],
-      "command_id" => row["command_id"],
-      "channel_id" => row["channel_id"],
-      "sender" => sender,
-      "type" => row["type"],
-      "format" => row["format"] || "plain",
-      "status" => row["status"],
-      # Column is `NOT NULL DEFAULT 'none'`; fallback mirrors projections.ex (defensive).
-      "stream_state" => row["stream_state"] || "none",
-      "text" => row["text"],
-      "reply_to" => row["reply_to"],
-      "reply_snapshot" => row["reply_snapshot_json"],
-      "attachments" => [],
-      "components" => [],
-      "mentions" => [],
-      "created_at" => format_ts(row["created_at"]),
-      "updated_at" => format_ts(row["updated_at"]),
-      "edited_at" => format_ts(row["edited_at"]),
-      "deleted_at" => format_ts(row["deleted_at"]),
-      "recalled_at" => format_ts(row["recalled_at"])
-    }
-  end
+  # Contract §2.3 ISO-8601 UTC `Z` timestamps — shared formatting
+  # (see `LiliumChat.Projections.format_ts/1`).
+  defp format_ts(value), do: Projections.format_ts(value)
 
   # ------------------------------------------------------- internal helpers
 

@@ -19,7 +19,7 @@ defmodule LiliumChat.Stream do
 
   require Logger
 
-  alias LiliumChat.{BotStream, BotStream.Seq, Channel, Errors, Query, Repo}
+  alias LiliumChat.{BotStream, BotStream.Seq, Channel, Errors, Projections, Query, Repo}
   alias LiliumChat.WebSockets.Frames
 
   # ---------------------------------------------------------------- lifecycle
@@ -274,7 +274,8 @@ defmodule LiliumChat.Stream do
     ready = %{
       channel_id: state.channel_id,
       message_id: state.message_id,
-      expires_at: DateTime.to_iso8601(state.expires_at),
+      # Contract §2.3: ISO 8601 UTC with explicit `Z`.
+      expires_at: Projections.iso_z(DateTime.to_iso8601(state.expires_at)),
       ack_seq: state.ack_seq
     }
 
@@ -691,7 +692,8 @@ defmodule LiliumChat.Stream do
       "channel_id" => attrs.channel_id,
       "message_id" => attrs.message_id,
       "ws_url" => "/api/chat/bot/channels/#{attrs.channel_id}/streams/#{attrs.message_id}/ws",
-      "expires_at" => DateTime.to_iso8601(attrs.expires_at)
+      # Contract §2.3: ISO 8601 UTC with explicit `Z`.
+      "expires_at" => Projections.iso_z(DateTime.to_iso8601(attrs.expires_at))
     }
   end
 

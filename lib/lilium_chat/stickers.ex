@@ -20,8 +20,8 @@ defmodule LiliumChat.Stickers do
     (`STICKER_LIBRARY_LIMIT_EXCEEDED`). A soft-deleted item is revived
     (fresh `created_at`), an active item is returned unchanged.
   * `delete/3` — `DELETE /api/chat/stickers/{sticker_id}`: soft-delete the
-    caller's item (idempotent; deleting a missing item still succeeds). A
-    sticker owned by another user is `FORBIDDEN`.
+    caller's item (idempotent; deleting a missing item — or a sticker owned
+    by another user, per §8.3 sticker_id 跨用户不稳定 — still succeeds).
 
   Idempotency: the unified `chat_v2.idempotency` table (`namespace =
   'user_command'`, spec D10) via `LiliumChat.Idempotency` — operations
@@ -178,9 +178,10 @@ defmodule LiliumChat.Stickers do
 
   `operation_id` is the HTTP `Idempotency-Key`. Returns the
   `{"sticker_id" => ..., "deleted" => true}` response map. Idempotent:
-  deleting an already-deleted or missing item still succeeds and still
-  records the idempotency row. A sticker owned by another user is
-  `FORBIDDEN`; a missing `Idempotency-Key` is `INVALID_MESSAGE`.
+  deleting an already-deleted, missing, or foreign (another user's) item
+  still succeeds and still records the idempotency row (old-Worker parity,
+  contract §8.3 跨用户不稳定). A missing `Idempotency-Key` is
+  `INVALID_MESSAGE`.
   """
   def delete(user_id, operation_id, sticker_id) do
     if is_nil(operation_id) do
@@ -204,17 +205,16 @@ defmodule LiliumChat.Stickers do
       fn ->
         row = find_sticker(sticker_id)
 
-        # A row owned by someone else is FORBIDDEN; a missing row is an
-        # idempotent no-op (old Worker parity: still records the
-        # idempotency row and answers deleted:true).
-        if row && row["user_id"] != user_id do
-          raise Errors.new("FORBIDDEN", "sticker does not belong to user")
-        end
-
-        if row && row["deleted_at"] == nil do
+        # Old-Worker parity (issue #27): personal_stickers lives in the
+        # owner's UserDirectory DO, so a sticker owned by another user is
+        # simply not in the caller's library — the Worker's forbidden branch
+        # is unreachable in practice and the delete is an idempotent no-op
+        # (still records the idempotency row, answers deleted:true).
+        # Contract §8.3: `sticker_id` 跨用户不稳定 + 重复删除幂等.
+        if row && row["user_id"] == user_id && row["deleted_at"] == nil do
           Repo.query!(
-            "UPDATE chat_v2.personal_stickers SET deleted_at = $2 WHERE sticker_id = $1",
-            [sticker_id, now]
+            "UPDATE chat_v2.personal_stickers SET deleted_at = $2 WHERE sticker_id = $1 AND user_id = $3",
+            [sticker_id, now, user_id]
           )
         end
 

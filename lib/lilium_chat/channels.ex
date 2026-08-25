@@ -70,7 +70,8 @@ defmodule LiliumChat.Channels do
     role = member_role(user_id, channel_id)
 
     if meta["visibility"] == "private" and role == nil do
-      raise Errors.new("FORBIDDEN")
+      # Contract §2.6 error-envelope example wording for FORBIDDEN.
+      raise Errors.new("FORBIDDEN", "not a channel member")
     end
 
     last_event_id = last_event_id(channel_id)
@@ -233,10 +234,12 @@ defmodule LiliumChat.Channels do
   end
 
   # DM channels: summary title/avatar resolve to the peer (contract §3.2).
+  # Non-DM channels omit the `dm_peer` key entirely (contract §5.2 ChannelDetail
+  # example has no dm_peer field — the key exists only for kind="dm").
   defp with_dm_peer(summary, dm_peer, profiles) do
     case dm_peer do
       nil ->
-        Map.put(summary, "dm_peer", nil)
+        summary
 
       peer_id ->
         profile = Map.get(profiles, peer_id)

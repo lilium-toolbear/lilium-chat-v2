@@ -15,6 +15,8 @@ defmodule LiliumChat.BotGateway do
   module and the old Worker differ, this module (and the contract) win.
   """
 
+  alias LiliumChat.Projections
+
   @api_version "lilium.chat.bot.v1"
 
   # delivery_result limits (contract §9.7 / old Worker parseDeliveryResult)
@@ -102,7 +104,8 @@ defmodule LiliumChat.BotGateway do
       "api_version" => @api_version,
       "bot_id" => bot_id,
       "session_id" => session_id,
-      "server_time" => DateTime.to_iso8601(DateTime.utc_now())
+      # Contract §2.3: ISO 8601 UTC with explicit `Z`.
+      "server_time" => Projections.iso_z(DateTime.to_iso8601(DateTime.utc_now()))
     }
   end
 

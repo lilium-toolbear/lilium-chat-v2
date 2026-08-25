@@ -110,6 +110,9 @@ defmodule LiliumChatWeb.ReadPathControllerTest do
     assert json["channel"]["channel_id"] == ch
     assert json["channel"]["title"] == "Alpha"
     assert is_list(json["channel_pins"])
+    # Contract §5.2 ChannelDetail has no dm_peer field — the key is only
+    # present for kind="dm" (issue #27).
+    refute Map.has_key?(json["channel"], "dm_peer")
     _ = mid
   end
 
@@ -133,6 +136,8 @@ defmodule LiliumChatWeb.ReadPathControllerTest do
     conn = request(:get, "/api/chat/channels/#{ch}", [{"origin", @origin} | auth_headers()])
     assert conn.status == 403
     assert body_json(conn)["error"]["code"] == "FORBIDDEN"
+    # Contract §2.6 error-envelope example wording.
+    assert body_json(conn)["error"]["message"] == "not a channel member"
   end
 
   # ---------------------------------------------------------- messages page

@@ -572,14 +572,22 @@ defmodule LiliumChat.StickersTest do
     assert response == %{"sticker_id" => "sticker-does-not-exist", "deleted" => true}
   end
 
-  test "delete: another user's sticker → FORBIDDEN" do
+  test "delete: another user's sticker is an idempotent no-op (old Worker parity)" do
+    # Old Worker: personal_stickers lives in the owner's UserDirectory DO, so
+    # a foreign sticker_id is simply not in the caller's library — the
+    # Worker's forbidden branch is unreachable and the delete is a no-op
+    # success. Contract §8.3: `sticker_id` 跨用户不稳定 + 重复删除幂等.
     seed_library_channel(@ch)
     att = own_att(@other, "att-del-4")
     saved = Stickers.save(@other, "op-del-save-4", %{"channel_id" => @ch, "attachment_id" => att})
+    sticker_id = saved["sticker"]["sticker_id"]
 
-    assert_api_error("FORBIDDEN", fn ->
-      Stickers.delete(@viewer, "op-del-4", saved["sticker"]["sticker_id"])
-    end)
+    response = Stickers.delete(@viewer, "op-del-4", sticker_id)
+    assert response == %{"sticker_id" => sticker_id, "deleted" => true}
+
+    # The foreign sticker survives the no-op delete.
+    list = Stickers.list_for_user(@other, limit: 10)
+    assert Enum.any?(list[:items], &(&1["sticker_id"] == sticker_id))
   end
 
   test "delete: same key + different sticker_id → IDEMPOTENCY_CONFLICT" do

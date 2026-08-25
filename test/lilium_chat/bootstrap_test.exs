@@ -99,8 +99,20 @@ defmodule LiliumChat.BootstrapTest do
     seed_channel(@ch1, "General", "channel")
     seed_membership(@ch1, @user_id, "member")
     # Explicit event_ids ensure deterministic ordering (UUIDv7 is time-ordered)
-    seed_message(@ch1, @other_user, "first message", nil, "01JAAAAAAAAAAAAAAAAAAAAAAAAA01")
-    seed_message(@ch1, @other_user, "second message", nil, "01JBBBBBBBBBBBBBBBBBBBBBBBBBB02")
+    first_id =
+      seed_message_with_event(
+        @ch1,
+        @other_user,
+        "first message",
+        "01JAAAAAAAAAAAAAAAAAAAAAAAAA01"
+      )
+
+    seed_message_with_event(
+      @ch1,
+      @other_user,
+      "second message",
+      "01JBBBBBBBBBBBBBBBBBBBBBBBBBB02"
+    )
 
     result = Bootstrap.fetch(@user_id, nil)
 
@@ -108,16 +120,19 @@ defmodule LiliumChat.BootstrapTest do
     assert length(messages["items"]) == 2
     assert messages["next_cursor"] == nil
 
-    # Messages are in chronological order (oldest first in the list)
+    # Bootstrap messages are the channel TIMELINE (event frames, same
+    # projection as GET /channels/{id}/messages, contract §6.1/§4.1),
+    # oldest first.
     first = List.first(messages["items"])
-    assert first["text"] == "first message"
-    assert first["type"] == "text"
-    assert first["status"] == "active"
-    # stream_state projects the column value verbatim (seeded 'final');
-    # the fallback in Bootstrap.project_message/1 is defensive (NOT NULL DEFAULT 'none').
-    assert first["stream_state"] == "final"
-    assert first["sender"]["kind"] == "user"
-    assert first["sender"]["user"]["user_id"] == @other_user
+    assert first["frame_type"] == "event"
+    assert first["type"] == "message.created"
+    assert first["event_id"] == "01JAAAAAAAAAAAAAAAAAAAAAAAAA01"
+    assert first["payload"]["message"]["message_id"] == first_id
+    assert first["payload"]["message"]["text"] == "first message"
+    assert first["payload"]["message"]["status"] == "normal"
+    assert first["payload"]["message"]["stream_state"] == "none"
+    assert first["payload"]["message"]["sender"]["kind"] == "user"
+    assert first["payload"]["message"]["sender"]["user"]["user_id"] == @other_user
   end
 
   test "populated: channel_pins returned for active channel" do
@@ -137,7 +152,7 @@ defmodule LiliumChat.BootstrapTest do
     seed_channel(@ch2, "Channel 2", "channel")
     seed_membership(@ch1, @user_id, "member")
     seed_membership(@ch2, @user_id, "owner")
-    seed_message(@ch2, @other_user, "important")
+    seed_message_with_event(@ch2, @other_user, "important")
 
     result = Bootstrap.fetch(@user_id, @ch2)
 
@@ -145,10 +160,10 @@ defmodule LiliumChat.BootstrapTest do
     assert result["active_channel"]["title"] == "Channel 2"
     assert result["active_channel"]["role"] == "owner"
 
-    # Messages should be from ch2
+    # Messages should be the ch2 timeline
     messages = result["messages"]
     assert length(messages["items"]) == 1
-    assert hd(messages["items"])["text"] == "important"
+    assert hd(messages["items"])["payload"]["message"]["text"] == "important"
   end
 
   test "active channel: unknown channel_id → active_channel is nil" do
@@ -202,10 +217,11 @@ defmodule LiliumChat.BootstrapTest do
     {_result, stats} = ReadPath.run(fn -> Bootstrap.fetch(@user_id, nil) end)
 
     assert stats.writes == 0
-    # Bounded query count: main(1) + messages(1) + pins(1) + profiles(1) = 4
-    # (command_manifest is 0 here since no channel_id param)
+    # Bounded query count: main(1) + timeline channel-meta(2) + page(1) +
+    # message relation batch(1) + profiles(1) + pins(1) + bootstrap profile
+    # batch(1) = 8 (command_manifest is 0 here since no channel_id param)
     assert stats.reads >= 3
-    assert stats.reads <= 6
+    assert stats.reads <= 9
   end
 
   test "profile batch: display_name resolved from public.users (A10)" do
@@ -292,11 +308,43 @@ defmodule LiliumChat.BootstrapTest do
       INSERT INTO chat_v2.messages (message_id, command_id, dedupe_principal_key, channel_id,
         sender_kind, sender_user_id, type, format, status, text, stream_state,
         created_at, updated_at, event_id)
-      VALUES ($1, $2, $2, $3, 'user', $4, 'text', 'plain', 'active', $5, 'final', $6, $6, $7)
+      VALUES ($1, $2, $2, $3, 'user', $4, 'text', 'plain', 'normal', $5, 'none', $6, $6, $7)
       """,
       [message_id, Ecto.UUID.generate(), channel_id, sender_id, text, now, evt_id],
       type: true
     )
+  end
+
+  # A message row PLUS its `message.created` event (the shape the Timeline
+  # projection re-projects; payload keeps only stable refs per §10.4).
+  defp seed_message_with_event(channel_id, sender_id, text, event_id \\ Ecto.UUID.generate()) do
+    message_id = Ecto.UUID.generate()
+    now = DateTime.utc_now()
+
+    Repo.query!(
+      """
+      INSERT INTO chat_v2.messages (message_id, command_id, dedupe_principal_key, channel_id,
+        sender_kind, sender_user_id, type, format, status, text, stream_state,
+        created_at, updated_at, event_id)
+      VALUES ($1, $2, $2, $3, 'user', $4, 'text', 'plain', 'normal', $5, 'none', $6, $6, $7)
+      """,
+      [message_id, Ecto.UUID.generate(), channel_id, sender_id, text, now, event_id],
+      type: true
+    )
+
+    payload = Jason.encode!(%{"message" => %{"message_id" => message_id}})
+
+    Repo.query!(
+      """
+      INSERT INTO chat_v2.events (event_id, event_type, channel_id, actor_kind, actor_id,
+        actor_session_id, payload, membership_version_at_event, occurred_at)
+      VALUES ($1, 'message.created', $2, 'user', $4, NULL, $3::jsonb, 1, $5)
+      """,
+      [event_id, channel_id, payload, sender_id, now],
+      type: true
+    )
+
+    message_id
   end
 
   defp seed_pin(channel_id, source_message_id) do

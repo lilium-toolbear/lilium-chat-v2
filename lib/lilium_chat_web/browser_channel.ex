@@ -36,7 +36,7 @@ defmodule LiliumChatWeb.BrowserChannel do
 
   import Ecto.Query
 
-  alias LiliumChat.{Errors, Ids, MembershipCache, Repo}
+  alias LiliumChat.{Errors, Ids, MembershipCache, Projections, Repo}
   alias LiliumChat.WebSockets.Frames
 
   # PubSub topic helpers
@@ -448,9 +448,11 @@ defmodule LiliumChatWeb.BrowserChannel do
   defp mv_from_frame(_), do: 0
 
   defp lease_expiry do
+    # Contract §2.3: ISO 8601 UTC with explicit `Z`.
     DateTime.utc_now()
     |> DateTime.add(@lease_ttl_seconds, :second)
     |> DateTime.to_iso8601()
+    |> Projections.iso_z()
   end
 
   defp error_from(code), do: error_map(Errors.new(code))

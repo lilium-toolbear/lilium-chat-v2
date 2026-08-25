@@ -105,16 +105,16 @@ defmodule LiliumChat.Uploads do
   end
 
   defp do_finalize(user_id, attachment_id, idempotency_key, request_hash, s3_cfg) do
+    # Owner-scoped lookup (old-Worker parity, issue #27): the old Worker keeps
+    # pending attachments inside the OWNER's UserDirectory DO, so a cross-user
+    # finalize is a plain "not found" (415), not a FORBIDDEN. Contract §8.2
+    # ("确认 pending attachment 属于当前用户") is silent on the exact code.
     row =
-      find_attachment(attachment_id)
+      find_attachment(attachment_id, user_id)
       |> case do
         nil -> raise_api("UNSUPPORTED_ATTACHMENT_TYPE", "attachment not found")
         r -> r
       end
-
-    if row["owner_user_id"] != user_id do
-      raise_api("FORBIDDEN", "attachment does not belong to user")
-    end
 
     projection = project_attachment(row)
     response = %{"attachment" => projection}
@@ -323,16 +323,16 @@ defmodule LiliumChat.Uploads do
 
   # ------------------------------------------------------------- attachments
 
-  defp find_attachment(attachment_id) do
+  defp find_attachment(attachment_id, owner_user_id) do
     sql = """
     SELECT attachment_id, owner_user_id, kind, filename, mime_type, size_bytes,
            width, height, blurhash, storage_key, url, status, created_at
     FROM chat_v2.attachments
-    WHERE attachment_id = $1
+    WHERE attachment_id = $1 AND owner_user_id = $2
     LIMIT 1
     """
 
-    case Repo.query(sql, [attachment_id], type: true) do
+    case Repo.query(sql, [attachment_id, owner_user_id], type: true) do
       {:ok, %Postgrex.Result{columns: cols, rows: rows}} ->
         case rows do
           [] -> nil

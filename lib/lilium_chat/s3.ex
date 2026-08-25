@@ -158,7 +158,9 @@ defmodule LiliumChat.S3 do
 
     signature = signing_key(cfg, date_stamp) |> hmac_hex(string_to_sign)
 
-    signed_headers = "Cache-Control;Content-Type;host"
+    # SigV4: signed-headers list = lowercased, sorted header names (matches
+    # aws4fetch / old-Worker output).
+    signed_headers = "cache-control;content-type;host"
 
     # Build the final URL. The canonical query above used the sorted, encoded
     # form for signing; the URL query only needs to carry the same params (S3
@@ -229,12 +231,14 @@ defmodule LiliumChat.S3 do
     credential_scope = "#{date_stamp}/#{cfg.region}/s3/aws4_request"
     credential = "#{cfg.access_key_id}/#{credential_scope}"
     host = host_of(cfg.endpoint)
-    signed_headers = "Cache-Control;Content-Type;host"
+    # SigV4 canonical form: lowercased, sorted header names (AWS SigV4 spec;
+    # matches aws4fetch / old-Worker output).
+    signed_headers = "cache-control;content-type;host"
 
     canonical_headers =
-      "Cache-Control:" <>
+      "cache-control:" <>
         @cache_control <>
-        "\nContent-Type:" <> content_type <> "\nhost:" <> host
+        "\ncontent-type:" <> content_type <> "\nhost:" <> host
 
     "PUT\n" <>
       canonical_uri(cfg.bucket, key) <>
@@ -365,9 +369,12 @@ defmodule LiliumChat.S3 do
   defp header_value(headers, name) do
     name = String.downcase(to_string(name))
 
+    # `:httpc` delivers header names AND values as charlists; normalize both
+    # to strings so equality checks against contract literals (e.g.
+    # `content-type` == "image/png") work for every transport.
     headers =
       Enum.into(headers, %{}, fn
-        {k, v} -> {String.downcase(to_string(k)), v}
+        {k, v} -> {String.downcase(to_string(k)), to_string(v)}
       end)
 
     Map.get(headers, name)

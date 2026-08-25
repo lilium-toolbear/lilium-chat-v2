@@ -34,16 +34,18 @@ defmodule LiliumChat.S3Test do
     }
   end
 
-  # The exact canonical request the signer must produce (C7: URI has the bucket).
+  # The exact canonical request the signer must produce (C7: URI has the
+  # bucket). SigV4 canonical form: header NAMES lowercased + sorted
+  # (AWS SigV4 spec; matches aws4fetch / old-Worker output).
   @expected_canonical """
   PUT
   /lilium-chat-attachments/chat/00000000-0000-7000-8000-000000000501
   X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20260621%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260621T053000Z&X-Amz-Expires=300
-  Cache-Control:public, max-age=31536000, immutable
-  Content-Type:image/png
+  cache-control:public, max-age=31536000, immutable
+  content-type:image/png
   host:s3.kuma.homes
 
-  Cache-Control;Content-Type;host
+  cache-control;content-type;host
   UNSIGNED-PAYLOAD
   """
 
@@ -69,7 +71,8 @@ defmodule LiliumChat.S3Test do
     assert query(uri) |> get("X-Amz-Expires") == "300"
     assert query(uri) |> get("X-Amz-Algorithm") == "AWS4-HMAC-SHA256"
     assert query(uri) |> get("X-Amz-Date") == @amz_date
-    assert query(uri) |> get("X-Amz-SignedHeaders") == "Cache-Control;Content-Type;host"
+    # SigV4: the signed-headers list is the lowercased, sorted names.
+    assert query(uri) |> get("X-Amz-SignedHeaders") == "cache-control;content-type;host"
     assert query(uri) |> get("X-Amz-Credential") =~ "AKIAIOSFODNN7EXAMPLE"
     assert query(uri) |> get("X-Amz-Credential") =~ "us-east-1/s3/aws4_request"
 

@@ -24,13 +24,17 @@ config :lilium_chat, :jwt, secret: System.get_env("JWT_SECRET") || "test-only-jw
 # S3 / SeaweedFS (spec §6.2). Tests use a fake HEAD transport
 # (`LiliumChat.S3.TestTransport`) whose behaviour is set per-test via
 # `:s3_fake_head`, so no real object store is needed for `mix test`.
+# Credentials are deliberate literals (issue #27 batch-1): tests assert these
+# deterministic defaults regardless of container env — the app container
+# permanently carries conformance fake-S3 `S3_*` vars, which would leak into
+# `mix test`. The dev env still reads real env vars via config/dev.exs.
 config :lilium_chat, :s3,
-  access_key_id: System.get_env("S3_ACCESS_KEY_ID") || "test-access-key",
-  secret_access_key: System.get_env("S3_SECRET_ACCESS_KEY") || "test-secret-key",
-  region: System.get_env("S3_REGION") || "us-east-1",
-  endpoint: System.get_env("S3_ENDPOINT") || "https://s3.kuma.homes",
-  bucket: System.get_env("S3_BUCKET") || "lilium-chat-attachments",
-  public_base: System.get_env("S3_PUBLIC_BASE") || "https://s3.kuma.homes",
+  access_key_id: "test-access-key",
+  secret_access_key: "test-secret-key",
+  region: "us-east-1",
+  endpoint: "https://s3.kuma.homes",
+  bucket: "lilium-chat-attachments",
+  public_base: "https://s3.kuma.homes",
   presign_ttl_seconds: String.to_integer(System.get_env("PRESIGN_TTL_SECONDS") || "300")
 
 config :lilium_chat, :s3_transport, LiliumChat.S3.TestTransport

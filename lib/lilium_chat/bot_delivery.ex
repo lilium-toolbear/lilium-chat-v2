@@ -731,7 +731,11 @@ defmodule LiliumChat.BotDelivery do
     end
   end
 
-  defp iso(value) when is_struct(value, DateTime), do: DateTime.to_iso8601(value)
+  # Contract §2.3: ISO 8601 UTC with an explicit `Z` designator.
+  defp iso(value) when is_struct(value, DateTime) do
+    Projections.iso_z(DateTime.to_iso8601(value))
+  end
+
   defp iso(value) when is_struct(value, NaiveDateTime), do: NaiveDateTime.to_iso8601(value) <> "Z"
   defp iso(value), do: value
 

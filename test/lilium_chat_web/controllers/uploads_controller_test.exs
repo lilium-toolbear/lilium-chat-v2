@@ -158,7 +158,11 @@ defmodule LiliumChatWeb.UploadsControllerTest do
     assert body_json(conn)["error"]["code"] == "UNSUPPORTED_ATTACHMENT_TYPE"
   end
 
-  test "finalize: attachment owned by another user → 403 FORBIDDEN" do
+  test "finalize: attachment owned by another user → 415 NOT FOUND (owner-scoped parity)" do
+    # Old-Worker parity (issue #27): pending attachments are owner-scoped
+    # (per-DO storage there), so a foreign user's finalize surfaces as the
+    # same "attachment not found" 415 as an unknown id — contract §8.2 is
+    # silent on the exact code.
     id = presign_for(@uid2)
 
     Application.put_env(
@@ -176,8 +180,9 @@ defmodule LiliumChatWeb.UploadsControllerTest do
     conn =
       request(:post, "/api/chat/uploads/images/#{id}/finalize", headers, %{"etag" => nil})
 
-    assert conn.status == 403
-    assert body_json(conn)["error"]["code"] == "FORBIDDEN"
+    assert conn.status == 415
+    assert body_json(conn)["error"]["code"] == "UNSUPPORTED_ATTACHMENT_TYPE"
+    assert body_json(conn)["error"]["message"] == "attachment not found"
   end
 
   # ------------------------------------------------------------- helpers

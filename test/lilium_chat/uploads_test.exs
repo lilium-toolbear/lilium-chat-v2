@@ -204,11 +204,15 @@ defmodule LiliumChat.UploadsTest do
     end)
   end
 
-  test "finalize raises FORBIDDEN when the attachment belongs to another user" do
+  test "finalize: cross-user attachment is NOT FOUND (old-Worker owner-scoped parity)" do
+    # The old Worker stores pending attachments inside the OWNER'S UserDirectory
+    # DO, so a foreign user's finalize is a plain "not found" (415) rather
+    # than a FORBIDDEN — contract §8.2 is silent on the exact code. We mirror
+    # the owner-scoped lookup (issue #27 conformance).
     r = Uploads.presign(@other, "key-finalize-5", body())
     fake_head({:ok, 200, %{"content-type" => "image/png", "content-length" => "12345"}})
 
-    assert_api_error("FORBIDDEN", fn ->
+    assert_api_error("UNSUPPORTED_ATTACHMENT_TYPE", fn ->
       Uploads.finalize(@user, r["attachment_id"], nil, "key-finalize-5")
     end)
   end

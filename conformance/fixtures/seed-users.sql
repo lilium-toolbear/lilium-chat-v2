@@ -40,5 +40,6 @@ $$;
 
 INSERT INTO public.users (user_id, full_name, avatar_url) VALUES
   ('6f1e2c3d-4a5b-7c8d-9e0f-1a2b3c4d5e6f', 'Conformance Alice', NULL),
-  ('6f1e2c3d-4a5b-7c8d-9e0f-1a2b3c4d5e70', 'Conformance Bob', NULL)
+  ('6f1e2c3d-4a5b-7c8d-9e0f-1a2b3c4d5e70', 'Conformance Bob', NULL),
+  ('6f1e2c3d-4a5b-7c8d-9e0f-1a2b3c4d5e80', 'Conformance Carol', NULL)
 ON CONFLICT (user_id) DO UPDATE SET full_name = EXCLUDED.full_name, avatar_url = EXCLUDED.avatar_url;

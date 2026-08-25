@@ -61,10 +61,52 @@
  *     paths → `{{INVITE_CODE}}`. Contract §5.8: the invite code is a
  *     server-minted channel-level credential ("邀请码原文只返回一次") — not
  *     reproducible across targets.
+ *
+ *   Issue #27 batch B (member / invite / join / DM scenarios):
+ *   - Channel-list `items` (GET /channels) and bootstrap `channels[]` are
+ *     SORTED on both sides by (kind, title, dm_peer user_id). Contract §5.1
+ *     pins only the `{items, next_cursor}` shape — no ordering; the old
+ *     Worker returns `my_channels` insertion order (no ORDER BY), the v2
+ *     implementation returns `updated_at DESC, channel_id DESC`. Both are
+ *     implementation details; the sort key is made of scenario-deterministic
+ *     values (fixed titles / fixed actor ids), so the order is stable
+ *     across targets.
+ *   - `invite_url` (response value) → host kept, last path segment (the
+ *     invite code) → `{{INVITE_CODE}}`. Contract §5.8: `invite_url` =
+ *     `API_BASE_URL + /chat/invites/<code>` — the base is identical on both
+ *     targets (same configured origin), the code is server-minted.
+ *   - `MEMBER_NOT_FOUND` messages, pinned per old-Worker throw site (the
+ *     old Worker varies wording per route; the v2 implementation answers the
+ *     generic "Member not found" everywhere):
+ *       * `GET .../members/{user_id}` (show) → `"user is not a member of this
+ *         channel"`;
+ *       * `PATCH .../members/{user_id}` (role), `DELETE .../members/{user_id}`
+ *         (remove), `POST .../owner-transfer` → `"target not an active member"`.
+ *     Contract §7.1b–§7.5 pin the code (404) but not the wording; §2.5 v2.31
+ *     delta note licenses the message normalization.
+ *   - `CHANNEL_NOT_FOUND` messages on the member READ routes (list / show)
+ *     → `"channel not created"` (the old Worker's read-route wording).
+ *   - `CHANNEL_NOT_FOUND` on the join route → `"channel not found"` (the old
+ *     Worker's join-route wording). Contract §5.7 pins the code (404), not
+ *     the wording; the v2 implementation answers "Channel not found"
+ *     everywhere (§2.5 v2.31 delta note).
+ *   - `FORBIDDEN` messages on the member READ routes (list / show) →
+ *     `"not a channel member"` (contract §2.6 envelope wording, same rule as
+ *     channel detail; the old Worker says "not a member" on these routes,
+ *     the v2 implementation "Forbidden").
  *   - BotTokenCreated `plaintext` → `{{BOT_TOKEN}}`. Contract §9 (Bot create):
  *     `{ token_id, name, scopes, plaintext, created_at, expires_at }` —
  *     "`plaintext` 只返回一次": server-minted, opaque, not reproducible
  *     across targets.
+ *   - Bootstrap `event_state.per_channel` → `{}` on both sides. Contract §4.1:
+ *     the map is `{ channel_id: last_event_id }` — keys and values are
+ *     server-minted UUIDv7, and the target sets differ by design: the old
+ *     Worker's list rows hardcode `last_event_id: null` (known delta — its
+ *     per_channel injects only the active NON-DM channel's cursor from the
+ *     read bundle; a DM active channel gets none), while the v2 implementation
+ *     populates the map for every listed channel (the contract-correct
+ *     reading: "每个 channel_summary 项也带自身 last_event_id，二者一致").
+ *     Same family as the `last_event_id` normalization above.
  *
  * TRANSPORT-level response headers are dropped from BOTH captures before
  * diffing — they are HTTP/1.1 framing / server-framework details, not API
@@ -229,6 +271,16 @@ function normalizeS3Url(value: string): string | null {
 /** `/api/chat/invites/{invite_code}` paths (contract §5.8/§5.10). */
 const INVITE_PATH_RE = /^\/api\/chat\/invites\/[0-9a-zA-Z]{1,32}(\/accept)?$/;
 
+/**
+ * `invite_url` normalization (contract §5.8): keep the host + base path, mask
+ * only the final segment (the server-minted invite code).
+ */
+function normalizeInviteUrl(value: string): string {
+  const m = /^(https?:\/\/[^\s/]+\/chat\/invites\/)[^\s/?]+/i.exec(value);
+  if (m) return `${m[1]}${PLACEHOLDER_INVITE_CODE}`;
+  return value;
+}
+
 function normalizeString(
   value: string,
   opts: NormalizeOptions,
@@ -303,6 +355,13 @@ function normalizeDeep(
       // server-minted bot token — not reproducible across targets.
       if (key === "plaintext" && typeof v === "string") {
         out[finalKey] = PLACEHOLDER_BOT_TOKEN;
+        continue;
+      }
+      // `invite_url` (§5.8): `API_BASE_URL + /chat/invites/<code>`. The base
+      // is identical on both targets (same configured origin); the code is
+      // server-minted → mask only the last path segment.
+      if (key === "invite_url" && typeof v === "string") {
+        out[finalKey] = normalizeInviteUrl(v);
         continue;
       }
 
@@ -427,26 +486,71 @@ function trimActiveChannel(value: unknown): unknown {
 }
 
 /**
+ * Sort key for ChannelSummary lists (see module doc, issue #27 batch B):
+ * (kind, title, dm_peer user_id) — all scenario-deterministic values, so the
+ * resulting order is identical on both targets despite different server-side
+ * orderings (old Worker: my_channels insertion order; v2: updated_at DESC).
+ */
+function channelSummarySortKey(item: unknown): [string, string, string] {
+  if (item !== null && typeof item === "object") {
+    const record = item as Record<string, unknown>;
+    const kind = typeof record["kind"] === "string" ? record["kind"] : "";
+    const title = typeof record["title"] === "string" ? record["title"] : "";
+    const peer = record["dm_peer"];
+    const peerId =
+      peer !== null &&
+      typeof peer === "object" &&
+      typeof (peer as Record<string, unknown>)["user_id"] === "string"
+        ? ((peer as Record<string, unknown>)["user_id"] as string)
+        : "";
+    return [kind, title, peerId];
+  }
+  return ["", "", ""];
+}
+
+function compareChannelSummaries(a: unknown, b: unknown): number {
+  const ka = channelSummarySortKey(a);
+  const kb = channelSummarySortKey(b);
+  const pairs: Array<[string, string]> = [
+    [ka[0] ?? "", kb[0] ?? ""],
+    [ka[1] ?? "", kb[1] ?? ""],
+    [ka[2] ?? "", kb[2] ?? ""],
+  ];
+  for (const [x, y] of pairs) {
+    if (x < y) return -1;
+    if (x > y) return 1;
+  }
+  return 0;
+}
+
+function trimAndSortChannelList(list: unknown[]): unknown[] {
+  return list.map((item) => trimChannelSummaryItem(item)).sort(compareChannelSummaries);
+}
+
+/**
  * Apply the ChannelSummary trim to a list endpoint's `items[]` or the
  * bootstrap response's `channels[]`, plus the §4.1 `active_channel` trim for
- * the bootstrap response.
+ * the bootstrap response. ChannelSummary lists are also sorted (see module
+ * doc — contract §5.1 pins no ordering).
  */
 function trimListedChannelSummaries(body: unknown, path: string): unknown {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return body;
   const record = body as Record<string, unknown>;
   if (Array.isArray(record["items"])) {
-    record["items"] = (record["items"] as unknown[]).map((item) =>
-      trimChannelSummaryItem(item),
-    );
+    record["items"] = trimAndSortChannelList(record["items"] as unknown[]);
   }
   if (path === "/api/chat/bootstrap") {
     if (Array.isArray(record["channels"])) {
-      record["channels"] = (record["channels"] as unknown[]).map((item) =>
-        trimChannelSummaryItem(item),
-      );
+      record["channels"] = trimAndSortChannelList(record["channels"] as unknown[]);
     }
     if (record["active_channel"] !== undefined) {
       record["active_channel"] = trimActiveChannel(record["active_channel"]);
+    }
+    // §4.1 event_state.per_channel — see module doc (server-minted cursor
+    // map; target sets differ by design, old-Worker delta family).
+    const eventState = record["event_state"];
+    if (eventState !== null && typeof eventState === "object" && !Array.isArray(eventState)) {
+      (eventState as Record<string, unknown>)["per_channel"] = {};
     }
   }
   return record;
@@ -511,6 +615,55 @@ function normalizeForbiddenDetailMessage(body: unknown): unknown {
       (err as Record<string, unknown>)["code"] === "FORBIDDEN"
     ) {
       return { ...record, error: { ...(err as object), message: "not a channel member" } };
+    }
+  }
+  return body;
+}
+
+/** `/api/chat/channels/{id}/members` (list / add). */
+const MEMBER_LIST_ROUTE_RE = /^\/api\/chat\/channels\/[^/]+\/members$/;
+/** `/api/chat/channels/{id}/members/{user_id}` (show / role / remove). */
+const MEMBER_ITEM_ROUTE_RE = /^\/api\/chat\/channels\/[^/]+\/members\/[^/]+$/;
+/** `/api/chat/channels/{id}/owner-transfer` (contract §7.5). */
+const OWNER_TRANSFER_ROUTE_RE = /^\/api\/chat\/channels\/[^/]+\/owner-transfer$/;
+/** `/api/chat/channels/{id}/join` (contract §5.7). */
+const JOIN_ROUTE_RE = /^\/api\/chat\/channels\/[^/]+\/join$/;
+
+/**
+ * Issue #27 batch B: unify a few error messages whose wording the contract
+ * does NOT pin (it pins only the code + status) and where the old Worker's
+ * per-route wordings differ from the v2 implementation's generic ones.
+ * Cited in the module doc; the old Worker wording is the reference at every
+ * throw site for these codes (the old Worker itself varies per route —
+ * e.g. MEMBER_NOT_FOUND is "user is not a member of this channel" on the
+ * show read but "target not an active member" on role/remove/transfer).
+ */
+function normalizeBatchBErrorMessages(body: unknown, method: string, pathNoQuery: string): unknown {
+  if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+    const record = body as Record<string, unknown>;
+    const err = record["error"];
+    if (err === null || typeof err !== "object") return body;
+    const error = err as Record<string, unknown>;
+    const code = error["code"];
+    const memberRead = MEMBER_LIST_ROUTE_RE.test(pathNoQuery) || MEMBER_ITEM_ROUTE_RE.test(pathNoQuery);
+    let message: string | undefined;
+    if (code === "MEMBER_NOT_FOUND" && method === "GET" && MEMBER_ITEM_ROUTE_RE.test(pathNoQuery)) {
+      message = "user is not a member of this channel";
+    } else if (
+      code === "MEMBER_NOT_FOUND" &&
+      ((method === "PATCH" || method === "DELETE") && MEMBER_ITEM_ROUTE_RE.test(pathNoQuery)) ||
+      (code === "MEMBER_NOT_FOUND" && method === "POST" && OWNER_TRANSFER_ROUTE_RE.test(pathNoQuery))
+    ) {
+      message = "target not an active member";
+    } else if (code === "CHANNEL_NOT_FOUND" && memberRead) {
+      message = "channel not created";
+    } else if (code === "CHANNEL_NOT_FOUND" && method === "POST" && JOIN_ROUTE_RE.test(pathNoQuery)) {
+      message = "channel not found";
+    } else if (code === "FORBIDDEN" && memberRead) {
+      message = "not a channel member";
+    }
+    if (message !== undefined) {
+      return { ...record, error: { ...error, message } };
     }
   }
   return body;
@@ -584,6 +737,13 @@ export function normalizeCapture(capture: Capture, opts: NormalizeOptions = {}):
       ) {
         responseBody = normalizeForbiddenDetailMessage(responseBody);
       }
+      // Contract-delta: issue #27 batch B error-wording unification (member
+      // routes + join route — see module doc).
+      responseBody = normalizeBatchBErrorMessages(
+        responseBody,
+        step.http.request.method,
+        pathNoQuery,
+      );
       next.http = {
         request: {
           method: step.http.request.method,

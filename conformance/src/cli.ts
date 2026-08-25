@@ -30,6 +30,11 @@ import { jwtAuthBoundaries } from "../scenarios/jwt-auth-boundaries.js";
 import { readPaths } from "../scenarios/read-paths.js";
 import { uploadsPresignFinalize } from "../scenarios/uploads-presign-finalize.js";
 import { stickers } from "../scenarios/stickers.js";
+import { channelLifecycle } from "../scenarios/channel-lifecycle.js";
+import { memberLifecycle } from "../scenarios/member-lifecycle.js";
+import { inviteLifecycle } from "../scenarios/invite-lifecycle.js";
+import { publicJoin } from "../scenarios/public-join.js";
+import { dmOpen } from "../scenarios/dm-open.js";
 import { MockTarget } from "./targets/mock.js";
 import { WorkerTarget } from "./targets/worker.js";
 import { ElixirTarget } from "./targets/elixir.js";
@@ -45,6 +50,11 @@ const SCENARIOS: Record<string, Scenario> = {
   "read-paths": readPaths,
   "uploads-presign-finalize": uploadsPresignFinalize,
   stickers,
+  "channel-lifecycle": channelLifecycle,
+  "member-lifecycle": memberLifecycle,
+  "invite-lifecycle": inviteLifecycle,
+  "public-join": publicJoin,
+  "dm-open": dmOpen,
 };
 
 const DEFAULT_JWT_SECRET = "test-jwt-secret-do-not-use-in-prod"; // old repo test secret

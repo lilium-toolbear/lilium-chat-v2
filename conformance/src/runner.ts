@@ -40,6 +40,18 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DEFAULT_WAIT_MS = 10_000;
 const RETRY_INTERVAL_MS = 250;
 const DEFAULT_MAX_ATTEMPTS = 20;
+/**
+ * Fanout settle (issue #27 batch C). Fanout delivery is asynchronous on BOTH
+ * targets but at different speeds: the old Worker pushes channel-event frames
+ * synchronously inside the write request (plus user_event hints a few ms
+ * later via the UserDirectory projection alarm), while the Elixir target
+ * delivers every frame via the Postgres fanout AFTER the write response.
+ * Without a settle, the same fanout lands in different steps on the two
+ * targets (a step-boundary false positive). Waiting a fixed window before
+ * draining each step's socket buffers pins the union of frames per step on
+ * both sides (both targets' frames arrive far faster than this window).
+ */
+const SETTLE_MS = 400;
 
 // ---------------------------------------------------------------------------
 // Scenario static analysis
@@ -347,6 +359,16 @@ export async function runScenario(scenario: Scenario, endpoint: Endpoint, opts: 
       if (stepDef.kind === "ws.connect") socketFailedActors.add(stepDef.actor);
     }
 
+    // Settle before draining so both targets capture the same fanout union in
+    // the same step (see SETTLE_MS). `wait` steps already provide the window;
+    // connect/close produce no pending frames.
+    if (
+      stepDef.kind === "http" ||
+      stepDef.kind === "ws.command" ||
+      stepDef.kind === "ws.event"
+    ) {
+      await new Promise((r) => setTimeout(r, SETTLE_MS));
+    }
     drainTo(step);
     steps.push(step);
 

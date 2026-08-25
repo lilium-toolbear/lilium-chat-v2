@@ -35,6 +35,7 @@ import { memberLifecycle } from "../scenarios/member-lifecycle.js";
 import { inviteLifecycle } from "../scenarios/invite-lifecycle.js";
 import { publicJoin } from "../scenarios/public-join.js";
 import { dmOpen } from "../scenarios/dm-open.js";
+import { messageWrite } from "../scenarios/message-write.js";
 import { MockTarget } from "./targets/mock.js";
 import { WorkerTarget } from "./targets/worker.js";
 import { ElixirTarget } from "./targets/elixir.js";
@@ -55,6 +56,7 @@ const SCENARIOS: Record<string, Scenario> = {
   "invite-lifecycle": inviteLifecycle,
   "public-join": publicJoin,
   "dm-open": dmOpen,
+  "message-write": messageWrite,
 };
 
 const DEFAULT_JWT_SECRET = "test-jwt-secret-do-not-use-in-prod"; // old repo test secret

@@ -108,6 +108,30 @@
  *     reading: "每个 channel_summary 项也带自身 last_event_id，二者一致").
  *     Same family as the `last_event_id` normalization above.
  *
+ *   Issue #27 batch C (message write path):
+ *   - `system.notice` frames are also dropped from WS fanout captures
+ *     (`wsReceived`) on BOTH sides. Contract §6.5: an admin/owner delete of a
+ *     FOREIGN message emits an optional `system.notice` — the Elixir
+ *     implementation broadcasts it as a fanout frame, the old Worker emits no
+ *     such frame (same delta family as the event-list drop above; the
+ *     contract marks the notice optional: "可选").
+ *   - `GET /channels/{id}` (channel detail) `channel` object: the legacy
+ *     `last_message_preview` / `last_message_at` fields are dropped from both
+ *     sides. Contract §3.3 ChannelDetail is 11 fields and has no such keys —
+ *     they are §3.2 ChannelSummary denormalizations that both targets emit on
+ *     the detail read with DIFFERENT formats (old Worker: raw text / "" when
+ *     empty; v2: "display name: text" per the §3.2 example). Same family as
+ *     the §4.1 `active_channel` trim above.
+ *   - `ChannelPin.pinned_by` (contract §3.10.3): the `display_name` of the
+ *     pin's `pinned_by` UserSummary is placeholdered to `{{PINNED_BY_NAME}}`
+ *     on both sides. The old Worker resolves `pinned_by` with a FALLBACK
+ *     display name (`user-<id-prefix>`) on the channel-detail read, the
+ *     pin-event fanout frames, and the event-replay read, while the v2
+ *     implementation resolves the LIVE profile on all three (the initial pin
+ *     ack/event resolve the live profile on BOTH targets). The contract fixes
+ *     the UserSummary shape but not the resolution source, so only the
+ *     display name is placeholdered; `user_id` / `avatar_url` remain compared.
+ *
  * TRANSPORT-level response headers are dropped from BOTH captures before
  * diffing — they are HTTP/1.1 framing / server-framework details, not API
  * contract (miniflare vs Bandit legitimately differ):
@@ -170,6 +194,15 @@ export const PLACEHOLDER_EVENT_ID = "{{EVENT_ID}}";
 export const PLACEHOLDER_INVITE_CODE = "{{INVITE_CODE}}";
 /** Server-minted bot token plaintext (BotTokenCreated, "只返回一次"). */
 export const PLACEHOLDER_BOT_TOKEN = "{{BOT_TOKEN}}";
+/**
+ * Denormalized `UserSummary.display_name` under a pin's `pinned_by` (contract
+ * §3.10.3). The old Worker resolves it with a FALLBACK display name
+ * (`user-<id-prefix>`) on the detail read, pin-event fanout, and event-replay
+ * paths, while the v2 implementation resolves the LIVE profile on all of them
+ * (the initial pin ack/event resolve live on BOTH). The contract pins the
+ * UserSummary shape but not the resolution source → placeholder (issue #27 C).
+ */
+export const PLACEHOLDER_PINNED_BY_NAME = "{{PINNED_BY_NAME}}";
 
 /** Presigned S3 PUT object path — see module doc (contract §8.1). */
 export const PLACEHOLDER_S3_OBJECT_PATH = "{{S3_OBJECT_PATH}}";
@@ -364,6 +397,22 @@ function normalizeDeep(
         out[finalKey] = normalizeInviteUrl(v);
         continue;
       }
+      // `pinned_by` (ChannelPin, contract §3.10.3): denormalized UserSummary.
+      // The old Worker resolves it with a FALLBACK display name on the detail
+      // read, pin-event fanout, and event-replay paths; the v2 implementation
+      // resolves the LIVE profile on all of them (the initial pin ack/event
+      // resolve live on BOTH). Resolution source is contract-silent →
+      // placeholder the display name; user_id / avatar_url stay comparable.
+      if (key === "pinned_by" && v !== null && typeof v === "object" && !Array.isArray(v)) {
+        const userOut: Record<string, unknown> = {};
+        for (const [uk, uv] of Object.entries(v as Record<string, unknown>)) {
+          userOut[uk] = uk === "display_name"
+            ? PLACEHOLDER_PINNED_BY_NAME
+            : normalizeDeep(uv, opts, context);
+        }
+        out[finalKey] = userOut;
+        continue;
+      }
 
       out[finalKey] = normalizeDeep(v, opts, context);
     }
@@ -483,6 +532,31 @@ function trimActiveChannel(value: unknown): unknown {
     }
   }
   return value;
+}
+
+/**
+ * Channel-detail `channel` trim (contract §3.3, issue #27 batch C): the
+ * `GET /channels/{id}` `channel` object is the 11-field ChannelDetail shape —
+ * it has NO `last_message_preview` / `last_message_at` (those are §3.2
+ * ChannelSummary denormalizations). Both targets emit them on the detail read
+ * with DIFFERENT formats (old Worker: raw message text, "" when empty; v2:
+ * "display name: text" per the §3.2 example), so compare with the preview
+ * dropped from both sides. Same family as the §4.1 `active_channel` trim.
+ */
+const CHANNEL_DETAIL_EXTRA_FIELDS = ["last_message_preview", "last_message_at"];
+
+function trimChannelDetailBody(body: unknown): unknown {
+  if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+    const record = body as Record<string, unknown>;
+    const channel = record["channel"];
+    if (channel !== null && typeof channel === "object" && !Array.isArray(channel)) {
+      const ch = channel as Record<string, unknown>;
+      for (const field of CHANNEL_DETAIL_EXTRA_FIELDS) {
+        delete ch[field];
+      }
+    }
+  }
+  return body;
 }
 
 /**
@@ -730,12 +804,14 @@ export function normalizeCapture(capture: Capture, opts: NormalizeOptions = {}):
       ) {
         responseBody = trimListedChannelSummaries(responseBody, pathNoQuery);
       }
-      // Contract-delta: FORBIDDEN wording on channel detail (§2.6).
+      // Contract-delta: FORBIDDEN wording on channel detail (§2.6) +
+      // ChannelDetail `last_message_preview`/`last_message_at` trim (§3.3).
       if (
         step.http.request.method === "GET" &&
         /^\/api\/chat\/channels\/[^/]+$/.test(pathNoQuery)
       ) {
         responseBody = normalizeForbiddenDetailMessage(responseBody);
+        responseBody = trimChannelDetailBody(responseBody);
       }
       // Contract-delta: issue #27 batch B error-wording unification (member
       // routes + join route — see module doc).
@@ -767,9 +843,13 @@ export function normalizeCapture(capture: Capture, opts: NormalizeOptions = {}):
       );
     }
     if (step.wsReceived !== undefined) {
-      next.wsReceived = step.wsReceived.map((f) =>
-        normalizeEventFrames(normalizeIdempotencyConflict(normalizeDeep(f, opts, "body"))),
+      // ARRAY-level pass (not per-frame): besides the per-frame payload trims,
+      // the array branch drops `system.notice` fanout frames (Elixir-only
+      // §6.5 admin-delete notice — see module doc, issue #27 batch C).
+      const frames = step.wsReceived.map((f) =>
+        normalizeIdempotencyConflict(normalizeDeep(f, opts, "body")),
       );
+      next.wsReceived = normalizeEventFrames(frames) as unknown as StepCapture["wsReceived"];
     }
     return next as unknown as StepCapture;
   });

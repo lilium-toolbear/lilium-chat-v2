@@ -20,7 +20,7 @@ defmodule LiliumChat.Bootstrap do
   Reads are strictly read-only (no hidden writes).
   """
 
-  alias LiliumChat.{ChannelCommands, ChannelPins, Repo}
+  alias LiliumChat.{ChannelCommands, ChannelPins, Ids, Repo}
 
   @profile_batch_size 50
   @bootstrap_message_limit 50
@@ -293,27 +293,45 @@ defmodule LiliumChat.Bootstrap do
       unique
       |> Enum.chunk_every(@profile_batch_size)
       |> Enum.reduce(%{}, fn batch, acc ->
+        # `user_id` is UUID-keyed in the production ToolBear table — mirror
+        # the old Worker's `uuid[]` cast (see LiliumChat.Profiles).
         query = """
         SELECT user_id::text AS user_id, full_name, avatar_url
         FROM public.users
-        WHERE user_id = ANY($1)
+        WHERE user_id = ANY($1::uuid[])
         """
 
-        case Repo.query(query, [batch]) do
-          {:ok, result} ->
-            map =
-              for row <- rows_to_maps(result), into: %{} do
-                {row["user_id"],
-                 %{
-                   display_name: row["full_name"],
-                   avatar_url: row["avatar_url"]
-                 }}
-              end
+        # Postgrex encodes a `uuid[]` parameter only from 16-byte binaries
+        # (a hyphenated string raises DBConnection.EncodeError), and only
+        # UUID-shaped ids can match the column — drop the rest first.
+        ids =
+          Enum.filter(batch, fn id ->
+            is_binary(id) and
+              String.match?(
+                id,
+                ~r/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+              )
+          end)
 
-            Map.merge(acc, map)
+        if ids == [] do
+          acc
+        else
+          case Repo.query(query, [Enum.map(ids, &Ids.uuid_bytes/1)]) do
+            {:ok, result} ->
+              map =
+                for row <- rows_to_maps(result), into: %{} do
+                  {row["user_id"],
+                   %{
+                     display_name: row["full_name"],
+                     avatar_url: row["avatar_url"]
+                   }}
+                end
 
-          {:error, _} ->
-            acc
+              Map.merge(acc, map)
+
+            {:error, _} ->
+              acc
+          end
         end
       end)
     end

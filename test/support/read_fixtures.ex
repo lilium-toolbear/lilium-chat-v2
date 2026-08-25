@@ -11,7 +11,7 @@ defmodule LiliumChatWeb.ReadFixtures do
   `message.created` event (same `event_id`) so replay re-projection can be tested.
   """
 
-  alias LiliumChat.Repo
+  alias LiliumChat.{Ids, Repo}
 
   @doc """
   A deterministic, monotonically-ordered event_id (UUIDv7-shaped) for `n`.
@@ -154,13 +154,15 @@ defmodule LiliumChatWeb.ReadFixtures do
 
   @doc "Insert a public.users profile row."
   def seed_profile(user_id, full_name, avatar_url) do
+    # `user_id` is a `uuid` column (issue #27): Postgrex needs the 16-byte
+    # binary form, not the hyphenated string.
     Repo.query!(
       """
       INSERT INTO public.users (user_id, full_name, avatar_url)
       VALUES ($1, $2, $3)
       ON CONFLICT (user_id) DO UPDATE SET full_name = $2, avatar_url = $3
       """,
-      [user_id, full_name, avatar_url]
+      [Ids.uuid_bytes(user_id), full_name, avatar_url]
     )
   end
 

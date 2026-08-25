@@ -9,6 +9,11 @@ defmodule LiliumChat.Repo.Migrations.CreatePublicUsers do
   only the columns the chat backend reads (`user_id`, `full_name`,
   `avatar_url`). The real production table is a superset.
 
+  `user_id` is **UUID**: the old Worker's profile query casts its parameter to
+  `uuid[]` (`WHERE user_id = ANY($1::uuid[])`), which type-errors against a
+  VARCHAR column — the conformance gate (issue #27) needs the dev table to
+  mirror the production ToolBear shape.
+
   The `down` is intentionally a no-op: rolling back this migration in
   production must NOT drop the real `public.users` table.
   """
@@ -17,7 +22,7 @@ defmodule LiliumChat.Repo.Migrations.CreatePublicUsers do
   def change do
     execute """
     CREATE TABLE IF NOT EXISTS public.users (
-      user_id   VARCHAR(255) PRIMARY KEY,
+      user_id   UUID PRIMARY KEY,
       full_name VARCHAR(255),
       avatar_url TEXT
     )

@@ -8,9 +8,13 @@ defmodule LiliumChat.Profiles do
   from the map (callers fall back to `Projections.fallback_display_name/1`).
   """
 
-  alias LiliumChat.Repo
+  alias LiliumChat.{Ids, Repo}
 
   @batch 50
+
+  # Only UUID-shaped ids can match the `uuid` column; non-UUID ids (test
+  # fixtures use bare strings such as "userws001") resolve to no profile.
+  @uuid_re ~r/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
   @doc "Batch-resolve the given user ids (deduped) to a profile map."
   def resolve(user_ids) do
@@ -22,27 +26,40 @@ defmodule LiliumChat.Profiles do
       unique
       |> Enum.chunk_every(@batch)
       |> Enum.reduce(%{}, fn batch, acc ->
+        # `user_id` is UUID-keyed in the production ToolBear table; the old
+        # Worker casts its parameter to `uuid[]` (src/profile/resolve.ts) —
+        # mirror the exact same predicate so both targets read identically
+        # (a VARCHAR dev column type-errors against `$1::uuid[]`, issue #27).
         query = """
         SELECT user_id::text AS user_id, full_name, avatar_url
         FROM public.users
-        WHERE user_id = ANY($1)
+        WHERE user_id = ANY($1::uuid[])
         """
 
-        case Repo.query(query, [batch]) do
-          {:ok, result} ->
-            map =
-              for row <- rows(result), into: %{} do
-                {row["user_id"],
-                 %{
-                   display_name: row["full_name"],
-                   avatar_url: row["avatar_url"]
-                 }}
-              end
+        # Postgrex encodes a `uuid[]` parameter only from 16-byte binaries
+        # (a hyphenated string raises DBConnection.EncodeError), and only
+        # UUID-shaped ids can match the column — drop the rest first.
+        ids = Enum.filter(batch, fn id -> is_binary(id) and String.match?(id, @uuid_re) end)
 
-            Map.merge(acc, map)
+        if ids == [] do
+          acc
+        else
+          case Repo.query(query, [Enum.map(ids, &Ids.uuid_bytes/1)]) do
+            {:ok, result} ->
+              map =
+                for row <- rows(result), into: %{} do
+                  {row["user_id"],
+                   %{
+                     display_name: row["full_name"],
+                     avatar_url: row["avatar_url"]
+                   }}
+                end
 
-          {:error, _} ->
-            acc
+              Map.merge(acc, map)
+
+            {:error, _} ->
+              acc
+          end
         end
       end)
     end

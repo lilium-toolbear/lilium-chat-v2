@@ -15,9 +15,16 @@
 
   "vars": {
     "API_BASE_URL": "https://lilium.kuma.homes",
-    "S3_ENDPOINT": "https://s3.kuma.homes",
-    "S3_BUCKET": "s3.kuma.homes",
-    "S3_PUBLIC_BASE": "https://s3.kuma.homes",
+    // Conformance S3 fixture (issue #27 batch B/C): the fake-s3 compose
+    // service (conformance/fixtures/fake-s3.mjs), published on 127.0.0.1:8900.
+    // This host runs the harness + worker on the podman host, so 127.0.0.1
+    // reaches the store from both the presign PUT and the finalize HEAD.
+    // The Elixir target signs with the SAME endpoint/creds (docker-compose
+    // app env) but HEADs via S3_PUBLIC_BASE=http://fake-s3:8900 (compose
+    // name — 127.0.0.1 is not resolvable inside the container).
+    "S3_ENDPOINT": "http://127.0.0.1:8900",
+    "S3_BUCKET": "lilium-chat-attachments",
+    "S3_PUBLIC_BASE": "http://127.0.0.1:8900",
     "S3_REGION": "us-east-1",
     "SENTRY_ENVIRONMENT": "conformance",
     "ALLOW_INTERNAL_TEST_ROUTES": "1"

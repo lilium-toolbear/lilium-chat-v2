@@ -39,9 +39,24 @@ interface BaseStep {
 export interface HttpStep extends BaseStep {
   kind: "http";
   method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
-  /** Path (may contain `${var}` interpolation), e.g. `/api/chat/bootstrap`. */
+  /**
+   * Path (may contain `${var}` interpolation), e.g. `/api/chat/bootstrap`.
+   * With `absolute`, `path` is the FULL URL instead of a target-relative
+   * path (used for the S3 PUT steps that hit the fixture object store).
+   */
   path: string;
+  /** Treat `path` as a full `http(s)://` URL rather than target-relative. */
+  absolute?: boolean;
   body?: unknown;
+  /**
+   * Raw binary body (base64) sent AS-IS — the JSON body (`body`) is
+   * `JSON.stringify`ed, which would corrupt binary content and mangle the
+   * Content-Length that a presigned PUT signature constrains (contract
+   * §8.1: Content-Length ≤ size_bytes, exact bytes required). When set,
+   * `body` must be omitted; the base64 string itself is recorded in the
+   * capture (static scenario literal — deterministic across targets).
+   */
+  base64Body?: string;
   /**
    * Request headers. A value of `null` marks the header as EXPLICITLY
    * omitted — notably `Authorization: null` suppresses the actor's default

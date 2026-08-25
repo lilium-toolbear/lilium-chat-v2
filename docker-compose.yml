@@ -33,12 +33,29 @@ services:
       retries: 20
       start_period: 10s
 
+  # Conformance S3 fixture (issue #27 batch B/C): minimal deterministic
+  # S3 stand-in (conformance/fixtures/fake-s3.mjs) so presign/finalize/
+  # sticker scenarios run self-contained. The old-Worker target (host-side
+  # wrangler) reaches it at 127.0.0.1:8900; the app container reaches it
+  # at http://fake-s3:8900 (see app S3_* env + conformance/.dev.vars).
+  fake-s3:
+    image: docker.io/library/node:22-alpine
+    container_name: lilium_fake_s3
+    working_dir: /app
+    command: node /app/fake-s3.mjs
+    volumes:
+      - ./conformance/fixtures:/app:ro
+    ports:
+      - "127.0.0.1:8900:8900"
+
   app:
     image: docker.io/library/elixir:1.20-otp-29
     container_name: lilium_chat_app
     depends_on:
       postgres:
         condition: service_healthy
+      fake-s3:
+        condition: service_started
     # Note: MIX_ENV is intentionally NOT set — mix defaults to :dev for
     # `mix phx.server`, and `mix test` sets :test itself. Pinning MIX_ENV
     # here would leak into `mix test` and break the SQL Sandbox pool.
@@ -48,6 +65,17 @@ services:
       # Default matches the conformance harness (old-repo test secret) so the
       # worker,elixir parity gate works out of the box; override via env.
       JWT_SECRET: "${JWT_SECRET:-test-jwt-secret-do-not-use-in-prod}"
+      # Conformance S3 fixture (issue #27 batch B/C) — see fake-s3 service.
+      # S3_ENDPOINT is generation-only here (presigned URL host + SigV4
+      # canonical host) and must equal the worker target's S3_ENDPOINT so
+      # both upload_urls carry the same host; HEAD goes to S3_PUBLIC_BASE,
+      # which is the compose-network name resolvable from THIS container.
+      S3_ENDPOINT: "http://127.0.0.1:8900"
+      S3_PUBLIC_BASE: "http://fake-s3:8900"
+      S3_BUCKET: "lilium-chat-attachments"
+      S3_REGION: "us-east-1"
+      S3_ACCESS_KEY_ID: "conformance-access-key"
+      S3_SECRET_ACCESS_KEY: "conformance-secret-key"
     ports:
       - "4000:4000"
     volumes:

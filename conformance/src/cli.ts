@@ -27,6 +27,9 @@ import { writeReports } from "./report.js";
 import type { Capture, Scenario } from "./types.js";
 import { bootstrapSendFanout } from "../scenarios/bootstrap-send-fanout.js";
 import { jwtAuthBoundaries } from "../scenarios/jwt-auth-boundaries.js";
+import { readPaths } from "../scenarios/read-paths.js";
+import { uploadsPresignFinalize } from "../scenarios/uploads-presign-finalize.js";
+import { stickers } from "../scenarios/stickers.js";
 import { MockTarget } from "./targets/mock.js";
 import { WorkerTarget } from "./targets/worker.js";
 import { ElixirTarget } from "./targets/elixir.js";
@@ -39,6 +42,9 @@ const REPO_ROOT = resolve(CONFORMANCE_DIR, "..");
 const SCENARIOS: Record<string, Scenario> = {
   "bootstrap-send-fanout": bootstrapSendFanout,
   "jwt-auth-boundaries": jwtAuthBoundaries,
+  "read-paths": readPaths,
+  "uploads-presign-finalize": uploadsPresignFinalize,
+  stickers,
 };
 
 const DEFAULT_JWT_SECRET = "test-jwt-secret-do-not-use-in-prod"; // old repo test secret

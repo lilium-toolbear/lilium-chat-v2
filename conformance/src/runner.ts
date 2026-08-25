@@ -126,11 +126,17 @@ async function httpCapture(
   path: string,
   headers: Record<string, string>,
   body: unknown,
+  absolute: boolean,
+  base64Body: string | undefined,
 ): Promise<{ response: HttpResponseCapture; requestHeaders: Record<string, string> }> {
-  const url = `${endpoint.httpBase}${path}`;
+  const url = absolute ? path : `${endpoint.httpBase}${path}`;
   const requestHeaders: Record<string, string> = { ...headers };
-  let payload: string | undefined;
-  if (body !== undefined) {
+  let payload: string | Uint8Array | undefined;
+  if (base64Body !== undefined) {
+    // Raw binary body (S3 presigned PUT): bytes + Content-Length must match
+    // exactly what the scenario sent (contract §8.1 size cap).
+    payload = Buffer.from(base64Body, "base64");
+  } else if (body !== undefined) {
     requestHeaders["Content-Type"] = requestHeaders["Content-Type"] ?? "application/json";
     payload = JSON.stringify(body);
   }
@@ -369,6 +375,10 @@ async function runHttpStep(
   tokens: Map<string, string>,
   origin: string,
 ): Promise<boolean> {
+  if (stepDef.body !== undefined && stepDef.base64Body !== undefined) {
+    step.error = "http step: `body` and `base64Body` are mutually exclusive";
+    return false;
+  }
   let path: string;
   let body: unknown;
   let headers: Record<string, string>;
@@ -393,10 +403,26 @@ async function runHttpStep(
     return false;
   }
 
+  // Capture the base64 string itself for binary bodies — a static scenario
+  // literal, deterministic across targets (the decoded bytes are volatile-
+  // free by construction).
+  const capturedBody = stepDef.base64Body !== undefined ? stepDef.base64Body : body;
+
   const attempt = async (): Promise<HttpResponseCapture> => {
-    const { response, requestHeaders } = await httpCapture(endpoint, stepDef.method, path, headers, body);
+    const { response, requestHeaders } = await httpCapture(
+      endpoint,
+      stepDef.method,
+      path,
+      headers,
+      body,
+      stepDef.absolute === true,
+      stepDef.base64Body,
+    );
     if (!step.http) {
-      step.http = { request: { method: stepDef.method, path, headers: requestHeaders, body }, response };
+      step.http = {
+        request: { method: stepDef.method, path, headers: requestHeaders, body: capturedBody },
+        response,
+      };
     } else {
       step.http.response = response; // retryUntil: keep final response only
     }

@@ -79,7 +79,17 @@ export class WorkerTarget implements ConformanceTarget {
     const devVars = join(CONFORMANCE_DIR, ".dev.vars");
     writeFileSync(
       devVars,
-      [`JWT_SECRET=${this.opts.jwtSecret}`, "ALLOW_INTERNAL_TEST_ROUTES=1", ""].join("\n"),
+      [
+        `JWT_SECRET=${this.opts.jwtSecret}`,
+        "ALLOW_INTERNAL_TEST_ROUTES=1",
+        // Conformance fake-S3 (issue #27 batch B/C): the old Worker's SigV4
+        // client (src/s3/client.ts createS3Client) reads the access key +
+        // secret even though signing is local — missing values surface as a
+        // generic 503 CHAT_WORKER_UNAVAILABLE via the error handler.
+        "S3_ACCESS_KEY_ID=conformance-access-key",
+        "S3_SECRET_ACCESS_KEY=conformance-secret-key",
+        "",
+      ].join("\n"),
       "utf8",
     );
 

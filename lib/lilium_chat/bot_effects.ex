@@ -1162,8 +1162,10 @@ defmodule LiliumChat.BotEffects do
         "url" => row["url"],
         "mime_type" => row["mime_type"],
         "size_bytes" => row["size_bytes"],
-        "width" => row["width"],
-        "height" => row["height"],
+        # NULL dimensions project as 0 (old Worker `projectAttachmentForBrowser`
+        # `?? 0`) — issue #26 B2.
+        "width" => row["width"] || 0,
+        "height" => row["height"] || 0,
         "blurhash" => row["blurhash"]
       }
     end)
@@ -1183,6 +1185,13 @@ defmodule LiliumChat.BotEffects do
         type: true
       )
     )
+    |> Enum.map(fn row ->
+      # NULL dimensions project as 0 (old Worker `projectAttachmentForBrowser`
+      # `?? 0`) — issue #26 B2.
+      row
+      |> Map.put("width", row["width"] || 0)
+      |> Map.put("height", row["height"] || 0)
+    end)
   end
 
   defp link_attachments(message_id, attachments) do

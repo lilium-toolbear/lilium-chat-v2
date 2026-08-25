@@ -113,6 +113,9 @@ defmodule LiliumChat.BootstrapTest do
     assert first["text"] == "first message"
     assert first["type"] == "text"
     assert first["status"] == "active"
+    # stream_state projects the column value verbatim (seeded 'final');
+    # the fallback in Bootstrap.project_message/1 is defensive (NOT NULL DEFAULT 'none').
+    assert first["stream_state"] == "final"
     assert first["sender"]["kind"] == "user"
     assert first["sender"]["user"]["user_id"] == @other_user
   end

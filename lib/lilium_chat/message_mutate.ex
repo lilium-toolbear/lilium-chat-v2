@@ -27,6 +27,7 @@ defmodule LiliumChat.MessageMutate do
 
   alias LiliumChat.{
     CanonicalJSON,
+    ChannelGates,
     ChannelPins,
     Errors,
     Idempotency,
@@ -98,7 +99,11 @@ defmodule LiliumChat.MessageMutate do
       Repo.transaction(fn ->
         # Dissolved gate first (old Worker order), then the in-txn
         # idempotency re-check, then the message row + role gates.
-        case dissolved_gate(meta) do
+        #
+        # #26: the gate re-reads `channels.status` FRESH inside the txn (old
+        # Worker `channelMetaStatusVisibility` in-txn) rather than trusting the
+        # pre-txn `meta` snapshot.
+        case ChannelGates.dissolved(channel_id) do
           {:error, api_error} ->
             Repo.rollback(%{kind: :error, error: api_error})
 
@@ -508,11 +513,10 @@ defmodule LiliumChat.MessageMutate do
     end
   end
 
-  defp dissolved_gate(%{"status" => "dissolved"}),
-    do: {:error, Errors.new("CHANNEL_DISSOLVED", "channel is dissolved")}
-
-  defp dissolved_gate(_meta), do: :ok
-
+  # #26 (issue #26 B3): the dissolved gate lives in `ChannelGates.dissolved/1`
+  # (shared with MessageSend) — it re-reads `channels.status` INSIDE the
+  # caller's transaction (old Worker parity), so a dissolve committed after the
+  # pre-txn `meta` snapshot is still caught under READ COMMITTED.
   # Over the WS path the old Worker returns CHANNEL_NOT_FOUND for a non-member
   # (not FORBIDDEN) — "channel not found or not a member".
   defp membership_gate(channel_id, user_id) do

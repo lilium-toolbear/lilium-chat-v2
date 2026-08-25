@@ -23,6 +23,7 @@ defmodule LiliumChat.MessageSend do
 
   alias LiliumChat.{
     CanonicalJSON,
+    ChannelGates,
     Errors,
     Idempotency,
     Ids,
@@ -173,7 +174,12 @@ defmodule LiliumChat.MessageSend do
         # (old Worker parity): a fresh send to a dissolved channel →
         # CHANNEL_DISSOLVED, while an already-committed duplicate already
         # returned its cached ack in the pre-check above (never reaches here).
-        case dissolved_gate(meta) do
+        #
+        # #26: the gate re-reads `channels.status` FRESH inside the txn (old
+        # Worker `channelMetaStatusVisibility` inside `storage.transaction`),
+        # instead of trusting the pre-txn `meta` snapshot — a dissolve that
+        # commits between the pre-txn read and this txn is still caught.
+        case ChannelGates.dissolved(channel_id) do
           {:error, api_error} ->
             Repo.rollback(%{kind: :error, error: api_error})
 
@@ -276,11 +282,10 @@ defmodule LiliumChat.MessageSend do
     end
   end
 
-  defp dissolved_gate(%{"status" => "dissolved"}),
-    do: {:error, Errors.new("CHANNEL_DISSOLVED", "channel is dissolved")}
-
-  defp dissolved_gate(_meta), do: :ok
-
+  # #26 (issue #26 B3): the dissolved gate lives in `ChannelGates.dissolved/1`
+  # (shared with MessageMutate) — it re-reads `channels.status` INSIDE the
+  # caller's transaction (old Worker parity), so a dissolve committed after the
+  # pre-txn `meta` snapshot is still caught under READ COMMITTED.
   defp membership_gate(channel_id, user_id) do
     row =
       Query.rows(
@@ -493,11 +498,12 @@ defmodule LiliumChat.MessageSend do
       target["status"] in ["deleted", "recalled"] ->
         ""
 
-      target["type"] == "image" ->
-        "[图片]"
-
-      target["type"] == "sticker" ->
-        "[表情]"
+      # Contract §3.5 (v2.31): replying to an image/sticker clears `text_preview`
+      # (no `[图片]`/`[表情]` placeholder — v2.31 does not emit `media_preview`;
+      # the old Worker shows the placeholder only when its media preview
+      # resolution fails, and emits `media_preview` otherwise — recorded delta).
+      target["type"] in ["image", "sticker"] ->
+        ""
 
       true ->
         text = to_string(target["text"] || "") |> String.trim()
@@ -532,12 +538,14 @@ defmodule LiliumChat.MessageSend do
     by_id = Enum.into(rows, %{}, &{&1["attachment_id"], &1})
 
     Enum.reduce(ids, {[], []}, fn id, {atts, projections} ->
+      # Old Worker `getAttachment` RPC message: missing / not-finalized /
+      # not-owned rows all surface as `attachment not finalized` (415).
       row =
         by_id[id] ||
-          raise(Errors.new("UNSUPPORTED_ATTACHMENT_TYPE", "attachment not available"))
+          raise(Errors.new("UNSUPPORTED_ATTACHMENT_TYPE", "attachment not finalized"))
 
       unless row["status"] == "finalized" and row["owner_user_id"] == user_id do
-        raise(Errors.new("UNSUPPORTED_ATTACHMENT_TYPE", "attachment not available"))
+        raise(Errors.new("UNSUPPORTED_ATTACHMENT_TYPE", "attachment not finalized"))
       end
 
       unless row["kind"] == "image" do

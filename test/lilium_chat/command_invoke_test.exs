@@ -606,6 +606,47 @@ defmodule LiliumChat.CommandInvokeTest do
              })
   end
 
+  test "invoke: reply to an image message clears the stored reply snapshot text_preview (#26 B1)" do
+    cid = channel!()
+    bot = new_bot()
+    command_id = stateless_command(bot, "ask")
+    bind!(cid, command_id, bot)
+    connect_bot!(bot)
+
+    Repo.query!(
+      """
+      INSERT INTO chat_v2.messages (
+        message_id, command_id, dedupe_principal_key, channel_id, sender_kind,
+        sender_user_id, type, format, status, text, stream_state, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, 'user', $5, 'image', 'plain', 'normal', NULL, 'none', $6, $6)
+      """,
+      ["msg-reply-img-target", "op-x", "user:" <> @other, cid, @other, DateTime.utc_now()],
+      type: true
+    )
+
+    {:ok, _} =
+      invoke(cid, "op-invoke-21b", %{
+        "bot_command_id" => command_id,
+        "reply_to_message_id" => "msg-reply-img-target",
+        "options" => %{"prompt" => %{"type" => "string", "value" => "x"}}
+      })
+
+    [inv] =
+      Query.rows(
+        Repo.query(
+          "SELECT reply_snapshot_json FROM chat_v2.messages " <>
+            "WHERE channel_id = $1 AND invocation_json IS NOT NULL",
+          [cid],
+          type: true
+        )
+      )
+
+    snapshot = Projections.json_map(inv["reply_snapshot_json"])
+    assert snapshot["message_id"] == "msg-reply-img-target"
+    assert snapshot["text_preview"] == ""
+    refute Map.has_key?(snapshot, "media_preview")
+  end
+
   test "invoke: idempotent replay returns the cached ack with no new events" do
     cid = channel!()
     bot = new_bot()

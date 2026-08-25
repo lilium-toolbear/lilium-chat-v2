@@ -144,7 +144,7 @@ defmodule LiliumChat.Errors do
       "CHANNEL_ARCHIVED" => "Channel is archived",
       "CHANNEL_DISSOLVED" => "Channel is dissolved",
       "MESSAGE_NOT_EDITABLE" => "Message is not editable",
-      "IDEMPOTENCY_CONFLICT" => "operation_id reused with different body",
+      "IDEMPOTENCY_CONFLICT" => "idempotency key reused with different request body",
       "ROUTE_INDEX_PENDING" => "Route index pending",
       "ATTACHMENT_TOO_LARGE" => "Attachment too large",
       "ARCHIVE_RECORD_TOO_LARGE" => "Archive record too large",

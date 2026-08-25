@@ -617,11 +617,10 @@ defmodule LiliumChat.CommandInvoke do
       row["status"] in ["deleted", "recalled"] ->
         ""
 
-      row["type"] == "image" ->
-        "[图片]"
-
-      row["type"] == "sticker" ->
-        "[表情]"
+      # Contract §3.5 (v2.31): image/sticker reply targets clear `text_preview`
+      # (no `[图片]`/`[表情]` placeholder; v2.31 emits no `media_preview`).
+      row["type"] in ["image", "sticker"] ->
+        ""
 
       true ->
         (row["text"] || "") |> String.slice(0, 80)

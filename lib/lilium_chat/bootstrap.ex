@@ -484,7 +484,8 @@ defmodule LiliumChat.Bootstrap do
       "type" => row["type"],
       "format" => row["format"] || "plain",
       "status" => row["status"],
-      "stream_state" => row["stream_state"] || "final",
+      # Column is `NOT NULL DEFAULT 'none'`; fallback mirrors projections.ex (defensive).
+      "stream_state" => row["stream_state"] || "none",
       "text" => row["text"],
       "reply_to" => row["reply_to"],
       "reply_snapshot" => row["reply_snapshot_json"],

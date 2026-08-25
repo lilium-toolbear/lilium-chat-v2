@@ -635,8 +635,10 @@ defmodule LiliumChat.Timeline do
           "url" => r["url"],
           "mime_type" => r["mime_type"],
           "size_bytes" => r["size_bytes"],
-          "width" => r["width"],
-          "height" => r["height"],
+          # Contract §3.4/§3.6: NULL dimensions project as 0 (old Worker
+          # `projectAttachmentForBrowser` `?? 0`) — issue #26 B2.
+          "width" => r["width"] || 0,
+          "height" => r["height"] || 0,
           "blurhash" => r["blurhash"]
         }
       end)

@@ -132,6 +132,16 @@ defmodule LiliumChat.ErrorsTest do
            }
   end
 
+  test "IDEMPOTENCY_CONFLICT default message is the single canonical v2.31 message (#26 A3)" do
+    # Contract §2.5: every operation surfaces the same canonical message; the
+    # old Worker's per-operation strings are a recorded delta (conformance
+    # normalizes the message, #27).
+    err = Errors.new("IDEMPOTENCY_CONFLICT")
+    assert err.message == "idempotency key reused with different request body"
+    assert err.http_status == 409
+    refute err.retryable
+  end
+
   test "envelope carries retryable true for retryable codes" do
     err = Errors.new("CHAT_WORKER_UNAVAILABLE")
     assert Errors.envelope(err, "req_x").error.retryable == true

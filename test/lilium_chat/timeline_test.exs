@@ -169,6 +169,30 @@ defmodule LiliumChat.TimelineTest do
            ]
   end
 
+  test "messages_page projects NULL attachment dimensions as 0 (#26 B2)" do
+    ch = "gggggggg-0000-7000-8000-gggggggggg12"
+    seed_channel(ch, created_by: @viewer)
+    seed_membership(ch, @viewer, "member")
+
+    att = seed_attachment("att-tl-nil", owner_user_id: @other, width: nil, height: nil)
+
+    m =
+      seed_message("gggggggg-0002-7000-8000-000000000002", ch, @other, nil,
+        type: "image",
+        event_id: eid(2),
+        created_at: t(2)
+      )
+
+    seed_message_attachment(m, att)
+
+    page = Timeline.messages_page(@viewer, ch, %{})
+    [frame] = page.items
+    [projected] = frame["payload"]["message"]["attachments"]
+    assert projected["attachment_id"] == att
+    assert projected["width"] == 0
+    assert projected["height"] == 0
+  end
+
   test "messages_page projects a sticker message's sticker snapshot" do
     ch = "hhhhhhhh-0000-7000-8000-hhhhhhhhhhhh"
     seed_channel(ch, created_by: @viewer)

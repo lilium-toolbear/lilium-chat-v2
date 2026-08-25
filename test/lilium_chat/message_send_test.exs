@@ -432,6 +432,131 @@ defmodule LiliumChat.MessageSendTest do
              })
   end
 
+  # ---------------------------------------------- reply-to-media (#26 B1)
+  #
+  # Contract §3.5 (v2.31): replying to an image/sticker clears `text_preview`
+  # (no `[图片]`/`[表情]` placeholder; v2.31 emits no `media_preview`).
+
+  test "reply to an image message → reply_snapshot.text_preview is empty" do
+    cid = channel!()
+    target_id = "msg-reply-img"
+    seed_message(target_id, cid, @other, "", type: "image", event: false)
+
+    {:ok, ack} =
+      send!(cid, "cmd-reply-img-1", %{
+        "type" => "text",
+        "text" => "nice pic",
+        "reply_to_message_id" => target_id
+      })
+
+    reply_snapshot = ack["payload"]["message"]["reply_snapshot"]
+    assert ack["payload"]["message"]["reply_to"] == target_id
+    assert reply_snapshot["message_id"] == target_id
+    assert reply_snapshot["status"] == "normal"
+    assert reply_snapshot["text_preview"] == ""
+    refute Map.has_key?(reply_snapshot, "media_preview")
+  end
+
+  test "reply to a sticker message → reply_snapshot.text_preview is empty" do
+    cid = channel!()
+    target_id = "msg-reply-sticker"
+    seed_message(target_id, cid, @other, "", type: "sticker", event: false)
+
+    {:ok, ack} =
+      send!(cid, "cmd-reply-stk-1", %{
+        "type" => "text",
+        "text" => "cute",
+        "reply_to_message_id" => target_id
+      })
+
+    assert ack["payload"]["message"]["reply_snapshot"]["text_preview"] == ""
+  end
+
+  test "reply to a text message keeps the text preview" do
+    cid = channel!()
+    target_id = "msg-reply-text"
+    seed_message(target_id, cid, @other, "上一条消息摘要", event: false)
+
+    {:ok, ack} =
+      send!(cid, "cmd-reply-txt-1", %{
+        "type" => "text",
+        "text" => "thanks",
+        "reply_to_message_id" => target_id
+      })
+
+    assert ack["payload"]["message"]["reply_snapshot"]["text_preview"] == "上一条消息摘要"
+  end
+
+  # ---------------------------------------------- attachment resolution (#26 B2)
+
+  test "image message: NULL attachment dimensions project as 0 (not null)" do
+    cid = channel!()
+    att = seed_attachment("att-nil-dim", owner_user_id: @uid, width: nil, height: nil)
+
+    {:ok, ack} =
+      send!(cid, "cmd-att-nil-1", %{
+        "type" => "image",
+        "attachment_ids" => [att]
+      })
+
+    [projected] = ack["payload"]["message"]["attachments"]
+    assert projected["attachment_id"] == att
+    assert projected["width"] == 0
+    assert projected["height"] == 0
+  end
+
+  test "image message: missing attachment → UNSUPPORTED_ATTACHMENT_TYPE 'attachment not finalized'" do
+    cid = channel!()
+
+    assert {:error, %LiliumChat.Errors.ApiError{} = err} =
+             send!(cid, "cmd-att-miss-1", %{
+               "type" => "image",
+               "attachment_ids" => ["att-does-not-exist"]
+             })
+
+    assert err.code == "UNSUPPORTED_ATTACHMENT_TYPE"
+    assert err.message == "attachment not finalized"
+  end
+
+  test "image message: attachment owned by another user → 'attachment not finalized'" do
+    cid = channel!()
+    att = seed_attachment("att-other-1", owner_user_id: @other)
+
+    assert {:error, %LiliumChat.Errors.ApiError{} = err} =
+             send!(cid, "cmd-att-own-1", %{
+               "type" => "image",
+               "attachment_ids" => [att]
+             })
+
+    assert err.code == "UNSUPPORTED_ATTACHMENT_TYPE"
+    assert err.message == "attachment not finalized"
+  end
+
+  test "image message: non-image attachment kind → 'only message image attachments can be sent in chat'" do
+    cid = channel!()
+    att = "att-video-1"
+
+    Repo.query!(
+      """
+      INSERT INTO chat_v2.attachments (attachment_id, owner_user_id, kind, filename, mime_type,
+        size_bytes, width, height, blurhash, storage_key, url, status, created_at)
+      VALUES ($1, $2, 'video', 'clip.mp4', 'video/mp4', 2048, NULL, NULL, NULL, 'chat/$1',
+        'https://s3.example.com/$1', 'finalized', now())
+      """,
+      [att, @uid],
+      type: true
+    )
+
+    assert {:error, %LiliumChat.Errors.ApiError{} = err} =
+             send!(cid, "cmd-att-kind-1", %{
+               "type" => "image",
+               "attachment_ids" => [att]
+             })
+
+    assert err.code == "UNSUPPORTED_ATTACHMENT_TYPE"
+    assert err.message == "only message image attachments can be sent in chat"
+  end
+
   # ------------------------------------------------- channel gates
 
   test "non-member → CHANNEL_NOT_FOUND (old Worker WS path, not FORBIDDEN)" do
@@ -459,6 +584,31 @@ defmodule LiliumChat.MessageSendTest do
     assert {:error, %LiliumChat.Errors.ApiError{code: "CHANNEL_DISSOLVED"}} =
              send!(cid, "cmd-gate-002", %{"type" => "text", "text" => "x"})
   end
+
+  test "cached replay still returns the committed ack after the channel is dissolved (pre-check short-circuit)" do
+    cid = channel!()
+    body = %{"type" => "text", "text" => "already committed"}
+    {:ok, ack1} = send!(cid, "cmd-gate-005", body)
+
+    Repo.query!("UPDATE chat_v2.channels SET status = 'dissolved' WHERE channel_id = $1", [cid])
+
+    # The same command_id + body replays the cached ack BEFORE the txn's
+    # dissolved gate (old Worker v4.0 cheap pre-check parity) — the commit
+    # happened while the channel was still active.
+    {:ok, ack2} = send!(cid, "cmd-gate-005", body)
+
+    assert ack1["payload"]["message"]["message_id"] == ack2["payload"]["message"]["message_id"]
+    assert message_count(cid) == 1
+  end
+
+  # NOTE (#26 B3): the "dissolve commits between the pre-txn meta read and the
+  # in-txn gate" race is NOT unit-testable here — the Ecto sandbox ownership
+  # pool serializes every query onto one connection, so a second connection
+  # (needed to commit a concurrent dissolve mid-send) cannot exist in a test.
+  # The fix (gate re-reads `channels.status` inside the txn, old Worker
+  # `channelMetaStatusVisibility` parity) is verified by the two tests above
+  # (fresh send to dissolved → rejected; committed duplicate → cached replay)
+  # and pinned by code comments in MessageSend / MessageMutate.
 
   test "missing channel → CHANNEL_NOT_FOUND" do
     assert {:error, %LiliumChat.Errors.ApiError{code: "CHANNEL_NOT_FOUND"}} =
